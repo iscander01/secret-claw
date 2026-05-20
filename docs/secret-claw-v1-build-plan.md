@@ -1,6 +1,6 @@
 # Secret Claw v1 Demo — Build Plan
 
-**Status:** Working document, May 19 2026 (v0.5)
+**Status:** Working document, May 20 2026 (v0.6)
 **Companion to:** `secret-claw-v1-demo-scope.md`
 **Purpose:** Define the engineering execution path from current state to "Internal testers have used the demo." Sequences the work, identifies dependencies, captures decisions that affect the build but not the product surface.
 
@@ -88,11 +88,15 @@ A Next.js application in `C:\dev\secret-claw\wizard\` deployed to Vercel. Stack 
 **Next.js API-route proxy (definite component):** the browser cannot call the SecretAI portal directly. The wizard ships with same-origin proxy routes that forward portal calls server-side. Concretely:
 
 - `POST /api/portal/validate-key` — accepts an API key in the request body, calls `GET https://secretai.scrtlabs.com/api/vm/instances` with `Authorization: Bearer <key>`, returns `{ valid: true, vmCount: N }` on 200 or `{ valid: false }` on 401
-- `POST /api/portal/vm-create` — accepts the wizard inputs (API key + Anthropic key + optional Telegram creds), renders the compose server-side (see below), submits `POST /api/vm/create` to the portal as multipart with the bearer token, returns `{ vmId, jobId }`
+- `POST /api/portal/vm-create` — accepts the wizard inputs (API key + Anthropic key + optional Telegram creds) plus the wizard-generated `deployment_id`, renders the compose server-side via the Node renderer (see below), submits `POST /api/vm/create` to the portal as multipart with the bearer token, returns `{ vmId, jobId }`
 - `GET /api/portal/job-status/[jobId]` — accepts the API key in a request header, polls `GET https://secretai.scrtlabs.com/api/background-job/<jobId>`, returns the upstream status
 - `GET /api/portal/templates` (optional, if used for screen 1) — calls `GET https://secretai.scrtlabs.com/api/templates`, returns the upstream response
 
 The bearer token never persists in the proxy. Each route is single-hop: receive token in request → attach to upstream → return upstream response → forget. No logging of credentials.
+
+**Node/TypeScript compose renderer (definite component):** the existing Python `render.py` at `deploys/byo/scripts/` remains as the canonical local CLI tool for `deploys/byo/`. The wizard backend implements the same rendering logic natively in TypeScript so the Next.js process can render without shelling out to Python. Both renderers must produce equivalent output for the same input; test fixtures under `wizard/tests/renderer/` exercise this with the same template + sample inputs run through both and a byte-diff (modulo intentionally-random fields: `deployment_id`, gateway token). Renderer scope is small — Mustache-style template substitution, UUID + random-token generation, multipart-ready buffer output.
+
+**Deployment-record lifecycle (locked at v0.6):** the deployment record is created at *wizard submission time*, not at provisioning completion. The wizard frontend generates the `deployment_id` (uuid) before any portal call, POSTs to the backend's `/api/record-deployment` with status="submitted", *then* calls `POST /api/portal/vm-create`. As `GET /api/portal/job-status/[jobId]` polling progresses, the wizard PATCHes the deployment record's status through `submitted → provisioning → ready` (or `→ failed` with `error_message`). Screen 5's polling is driven against the local backend's deployment status, which the wizard keeps in sync from portal polling — cleaner separation, and failed deploys persist as observable rows rather than vanishing.
 
 The frontend implements:
 
@@ -101,11 +105,12 @@ The frontend implements:
 - Form validation matching the design doc
 - Real-time API key validation for Anthropic (test call before accepting)
 - Real-time Telegram credential validation (getMe call to Telegram before accepting)
-- Multipart submission to the portal via `POST /api/portal/vm-create` (the proxy route renders the compose server-side from the user inputs)
-- Polling `GET /api/portal/job-status/[jobId]` for provisioning status
+- Frontend-generated `deployment_id` (uuid) and POST to `/api/record-deployment` at the moment the user clicks "deploy" on the final input screen
+- Multipart submission to the portal via `POST /api/portal/vm-create` (the proxy route renders the compose server-side from the user inputs via the Node renderer)
+- Polling `GET /api/portal/job-status/[jobId]` for provisioning status, with each status transition PATCHed to `/api/deployment-status/[deployment_id]`
 - Mobile responsive layouts
 
-The `getCurrentUser()` abstraction lives here — returns `{deploymentId: <newly-generated-uuid>, secretAiApiKey}` after the user pastes their key. Swappable for production auth later. Used in any place the code needs to know "who is this submission for."
+The `getCurrentUser()` abstraction lives here — returns `{deploymentId: <wizard-generated-uuid>, secretAiApiKey}` after the user pastes their key. Swappable for production auth later. Used in any place the code needs to know "who is this submission for."
 
 **Estimated time:** 4-5 days of focused Claude Code work. Significantly less than the v0.3 estimate because there's no Keplr integration to build.
 
@@ -127,11 +132,11 @@ API endpoints the wizard calls:
 
 - `POST /api/validate-anthropic-key` — tests an Anthropic key with a one-token call, returns ok or invalid (lightweight backend service; doesn't store the key)
 - `POST /api/validate-telegram` — tests a Telegram bot token with a getMe call, returns ok with bot username, or invalid
-- `POST /api/record-deployment` — accepts a deployment record (deployment_id, expected status), creates the database row
-- `PATCH /api/deployment-status/:deployment_id` — updates the deployment record as the wizard's provisioning progresses
-- `GET /api/deployment-status/:deployment_id` — returns current state; useful for owner observability
+- `POST /api/record-deployment` — accepts the wizard-generated `deployment_id` and a small payload of non-sensitive metadata (telegram_enabled flag, tier, timestamp). Creates the initial row with status="submitted". **Called at wizard submission time, before the portal `vm-create` call** — so even if portal submission fails the deployment row exists for owner observability.
+- `PATCH /api/deployment-status/:deployment_id` — updates the deployment record's status as the wizard's polling progresses. Status transitions: `submitted → provisioning → ready` or `submitted → provisioning → failed`. The `failed` patch carries an `error_message`. The `ready` patch carries the `vm_id` and `vm_hostname` returned by the portal.
+- `GET /api/deployment-status/:deployment_id` — returns current state; the wizard's screen 5 polls this (not the portal directly) so screen 5's status updates are driven by the local backend; useful for owner observability as well.
 
-SecretAI API key validation does NOT have a backend endpoint — that validation happens browser-side by hitting the SecretAI portal directly. This keeps user credentials out of our infrastructure entirely.
+SecretAI API key validation does NOT have a backend endpoint — that validation happens via the Next.js portal proxy hitting the SecretAI portal directly. The wizard backend never sees the user's SecretAI key. This keeps user credentials out of our persistent infrastructure entirely.
 
 The owner-side observability includes:
 - A read-only dashboard showing recent deployments (status, hostname, timestamp)
@@ -183,6 +188,10 @@ Architecture simplified again: API-key bearer auth instead of Keplr-in-wizard si
 
 **Browser-side vs backend-side compose rendering.** **Settled at v0.5: backend-side.** Chunk 2's CORS finding forces a Next.js proxy regardless, so the cost calculus changed — we now have a server-side path that has to exist anyway. Frontend collects inputs; `POST /api/portal/vm-create` receives them, renders the compose, and posts to the portal in one server-side call. The compose YAML never leaves the server before being submitted; the user's bearer token still doesn't persist beyond one request.
 
+**Python `render.py` vs Node port for the wizard backend.** **Settled at v0.6: Node port.** The wizard backend is Node already; shelling out to Python adds a runtime dependency that complicates Vercel deployment and introduces a subprocess boundary across a small, well-defined transformation (templating + UUID + random token + YAML write). The existing `deploys/byo/scripts/render.py` remains as the canonical local CLI tool — useful for `deploys/byo/` testing, manual renders, and as the rendering reference. The wizard's Node renderer is held to byte-equivalent output against the same template + inputs (test fixtures under `wizard/tests/renderer/`, modulo intentionally-random fields).
+
+**Deployment-record creation timing.** **Settled at v0.6: at wizard submission time.** Earlier drafts left this ambiguous (record at completion vs at submission). Settled in favor of submission-time creation because failed provisioning needs to leave an observable row — if the record only existed on success, failed deploys would be invisible to the owner dashboard. Screen 5's status polling is also cleaner against the local backend than against the portal directly. The wizard frontend generates the `deployment_id` (uuid) and POSTs to `/api/record-deployment` *before* calling the portal's `vm-create`. Status flows through PATCHes as polling progresses.
+
 **Specific SecretAI portal endpoint for API-key validation.** **Settled at v0.5: `GET /api/vm/instances` with `Authorization: Bearer <key>`.** Confirmed empirically — returns 200 with a VM list for valid keys, structured 401 for invalid/missing. `/api/auth/session` returns `{}` 200 regardless of bearer-token state (NextAuth quirk) and is unusable. See `wizard/prototypes/api-validation/FINDINGS.md` §2.
 
 **Vercel vs alternative hosting.** Default is Vercel.
@@ -230,3 +239,4 @@ Structure as defined in the scope doc.
 - **v0.3 (May 19 2026):** Pattern B self-service provisioning architecture confirmed.
 - **v0.4 (May 19 2026):** API-key auth replaces Keplr-in-wizard signing. Chunk 1 completed. Chunks 2-3 simplified.
 - **v0.5 (May 19 2026):** Chunk 2 Part 1 (API validation prototype) complete, findings folded in. `/api/vm/instances` confirmed as validation endpoint. Next.js API-route proxy now a definite Chunk 3 component (portal serves no CORS, so direct browser calls are impossible). Compose-rendering decision settled: backend-side. No user-identity display possible. See commit 360e7ca for the prototype and `wizard/prototypes/api-validation/FINDINGS.md` for empirical detail.
+- **v0.6 (May 20 2026):** Two architecture decisions locked before Chunk 3 design conversation begins. (1) Deployment records are created at wizard submission time, not at provisioning completion — the wizard frontend generates the `deployment_id` and POSTs to `/api/record-deployment` before the portal `vm-create` call, then PATCHes status as polling progresses. Failed deploys persist for owner observability. Screen 5's status polling runs against the local backend, kept in sync from portal polling. (2) Compose rendering ports from Python to Node/TypeScript for the wizard backend; `deploys/byo/scripts/render.py` remains as the canonical local CLI tool. Both must produce byte-equivalent output for the same template + inputs (test fixtures cover, modulo intentionally-random fields).

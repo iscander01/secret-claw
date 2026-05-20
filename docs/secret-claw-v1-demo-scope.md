@@ -1,6 +1,6 @@
 # Secret Claw — v1 Demo Scope
 
-**Status:** Working document, May 19 2026 (v0.5)
+**Status:** Working document, May 20 2026 (v0.6)
 **Owner:** Garbonzo
 **Purpose:** Define the deliberately narrow scope of the first demonstrable product, for internal testers (including Alex) to use and react to. Anchors engineering work. Surfaces decisions that need Alex's input before broader v1.
 
@@ -77,16 +77,20 @@ Concrete flow:
 1. User pastes their SecretAI portal API key into the wizard.
 2. Wizard validates the key against the portal (a lightweight authenticated call).
 3. User completes the rest of the wizard, providing their Anthropic API key and (optionally) Telegram credentials.
-4. Wizard renders the deploy template with user-specific values.
-5. Wizard submits `POST /api/vm/create` to the SecretAI portal with `Authorization: Bearer <api_key>` and the rendered compose attached as multipart form data.
-6. Wizard polls `/api/background-job/<jobId>` (also with bearer auth) until status transitions to completed.
-7. On completion, wizard reads the VM details (hostname, status) from the portal and shows them on the completion screen.
+4. On clicking "deploy" on the final input screen, the wizard frontend generates a `deployment_id` (uuid) and creates a deployment record in our backend with status="submitted" via `POST /api/record-deployment`. The record holds non-sensitive metadata only (deployment_id, tier, telegram_enabled flag, timestamp).
+5. Wizard renders the deploy template with user-specific values (server-side, via the wizard's Next.js portal proxy).
+6. Wizard submits `POST /api/vm/create` to the SecretAI portal with `Authorization: Bearer <api_key>` and the rendered compose attached as multipart form data.
+7. Wizard polls `/api/background-job/<jobId>` (also with bearer auth) until status transitions. As status transitions, the wizard PATCHes the deployment record (`submitted → provisioning → ready` on success; `→ failed` with `error_message` on failure). The `ready` patch carries `vm_id` and `vm_hostname`.
+8. Screen 5 polls the local backend's deployment record (not the portal directly), so its progress display is driven from a single source of truth that the owner dashboard also reads.
+9. On completion, the wizard reads the VM details from the deployment record and shows them on the completion screen.
 
 Key properties:
 
-- The wizard's backend never holds user credentials persistently. API keys, Anthropic keys, and Telegram credentials all flow from the wizard's form into the portal API call in a single transaction. After provisioning completes, the wizard's database only tracks the deployment ID and the resulting VM hostname for the user's reference.
+- **Deployment records persist regardless of outcome.** A row is created at submission time, before the portal is even called. If portal submission fails or provisioning errors out mid-flight, the row remains with status="failed" and `error_message` set — visible in the owner dashboard. The successful path adds `vm_id` and `vm_hostname`. The owner dashboard therefore shows every attempted deployment, not just successful ones.
+- **The wizard's backend never holds user credentials persistently.** API keys, Anthropic keys, and Telegram credentials all flow from the wizard's form into the portal API call in a single transaction. The deployment record holds only non-sensitive metadata (deployment_id, tier, telegram_enabled flag, timestamps, vm_id, vm_hostname, error_message). No bearer tokens, no Anthropic keys, no Telegram bot tokens.
 - The wizard is auth-method-agnostic. It accepts an API key from whoever generated it; the portal's auth method (currently Keplr) is invisible to the wizard. When the portal supports additional auth methods, the wizard works unchanged.
 - **The wizard frontend cannot call the SecretAI portal directly from the browser.** Empirical Chunk 2 finding: the portal returns no CORS response headers on any path, so every cross-origin preflight is blocked by the browser. The wizard ships with a thin Next.js API-route proxy (under `wizard/app/api/portal/*`) that forwards portal calls server-side, attaching the user-supplied bearer token to each upstream request. The token never persists in the proxy — single-hop forwarding only — which preserves the "no user credentials persisted in our infrastructure" property.
+- **Compose rendering happens in Node/TypeScript inside the wizard backend.** The existing Python renderer at `deploys/byo/scripts/render.py` remains as the canonical local CLI tool for direct `deploys/byo/` work; the wizard's Node renderer is the production path. Both must produce byte-equivalent output for the same inputs (modulo intentionally-random fields like deployment_id and gateway token).
 
 Reference: `docs/secretvm-provisioning-research.md` documents the SecretAI portal API in detail based on reading the `secretvm-cli` source code. The `Authorization: Bearer <api_key>` path is documented in `src/services/apiClient.ts:85-87`.
 
@@ -204,3 +208,4 @@ secret-claw/
 - **v0.3 (May 19 2026):** Pattern B self-service provisioning architecture confirmed by research. Wizard becomes a UI layer over the SecretAI portal API.
 - **v0.4 (May 19 2026):** Architecture simplified from Keplr-in-wizard signing to SecretAI portal API-key bearer auth. CLI docs confirmed API keys are a first-class auth mechanism for all VM operations. User generates the key in the portal once, pastes it into the wizard. Removes the Keplr handshake complexity entirely. Wizard is now auth-method-agnostic and forward-compatible with future portal auth methods.
 - **v0.5 (May 19 2026):** API validation prototype findings folded in. `/api/vm/instances` confirmed as validation endpoint. No user-identity display possible (bearer callers get null identity fields). CORS finding: portal does not implement preflight; wizard requires Next.js proxy routes for portal calls. See `wizard/prototypes/api-validation/FINDINGS.md` and commit 360e7ca.
+- **v0.6 (May 20 2026):** Architecture decisions locked before Chunk 3 design conversation. Deployment record lifecycle clarified: rows are created at wizard submission time (before the portal `vm-create` call) and status-tracked through `submitted → provisioning → ready`/`failed` as polling progresses. Failed deploys persist as observable rows in the owner dashboard. Compose rendering ports from Python to Node/TypeScript in the wizard backend; `deploys/byo/scripts/render.py` remains as the canonical local CLI tool. Both renderers held to byte-equivalent output.
