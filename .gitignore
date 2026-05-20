@@ -1,0 +1,42 @@
+# Rendered output — never commit deployment packages that contain real
+# per-user secrets. The renderer writes to ./out (or wherever the wizard
+# directs it), plus the two sidecar files that hold the gateway token and
+# deployment id.
+out/
+**/out/
+deployment_id.txt
+gateway_token.txt
+
+# Local user configs (live tester data must never be committed)
+*.user.json
+**/user.local.json
+!**/example-config/user.example.json
+!**/example-config/user.no-telegram.example.json
+!**/example-config/user.tomato-rat-test.json
+
+# Local-only env files
+.env
+.env.local
+*.local
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / Next.js (for wizard/, backend/ once they exist)
+node_modules/
+.next/
+out-next/
+dist/
+.npm/
+.pnpm-store/
+*.tsbuildinfo
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

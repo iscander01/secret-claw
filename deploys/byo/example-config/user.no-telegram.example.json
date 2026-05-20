@@ -1,0 +1,6 @@
+{
+  "VM_HOSTNAME": "amber-otter.vm.scrtlabs.com",
+  "ANTHROPIC_API_KEY": "sk-ant-EXAMPLE_REPLACE_ME",
+  "TELEGRAM_BOT_TOKEN": "",
+  "TELEGRAM_CHAT_ID": ""
+}

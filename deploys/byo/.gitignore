@@ -1,0 +1,22 @@
+# Rendered output — do not commit any deployment package that contains
+# real per-user secrets.
+out/
+/*.user.json
+!example-config/user.example.json
+
+# Local-only env files
+.env
+*.local
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

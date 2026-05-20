@@ -1,0 +1,115 @@
+# OpenClaw BYO SecretVM deploy template.
+#
+# Single-service shape, modeled on the production amethyst-eel deployment that
+# SecretVM has been running healthily for >24h. Differences:
+#   - The seed script is delivered via a `configs:` block (rewriter-preserves
+#     `content: |` verbatim, unlike `command:` block scalars which the
+#     rewriter converts |->>) and base64-decodes per-user files into the
+#     state volume on first boot.
+#   - No `--allow-unconfigured` because seeding always produces a valid
+#     openclaw.json before the gateway boots.
+#   - We override the image entrypoint with `sh /etc/openclaw-seed.sh` so the
+#     seed runs as root; the seed itself drops privs to user `node` (uid 1000)
+#     via `runuser` before exec'ing tini + node openclaw.mjs.
+#
+# SecretVM's compose rewriter will additionally:
+#   - Add a `traefik` service + bridge network and inject Traefik router
+#     labels on openclaw-gateway pointing to port 18789. We do NOT declare
+#     Traefik ourselves.
+#   - Inject `env_file: - usr/.env`. The vars in that file are SecretVM
+#     scaffolding (id_tx_io etc.) and do not collide with our env.
+#
+# See README.md for the rendering and deploy flow.
+
+x-openclaw-image: &openclaw-image
+  ghcr.io/openclaw/openclaw@sha256:e2482a66682de6f540dcfd9921e410c23fd060dcd441382ff952247ee911a672
+
+services:
+  openclaw-gateway:
+    image: *openclaw-image
+    container_name: openclaw-gateway-__DEPLOYMENT_ID_SHORT__
+    user: "0:0"
+    environment:
+      HOME: /home/node
+      OPENCLAW_HOME: /home/node
+      OPENCLAW_STATE_DIR: /home/node/.openclaw
+      OPENCLAW_CONFIG_PATH: /home/node/.openclaw/openclaw.json
+      OPENCLAW_CONFIG_DIR: /home/node/.openclaw
+      OPENCLAW_WORKSPACE_DIR: /home/node/.openclaw/workspace
+      OPENCLAW_DISABLE_BONJOUR: "1"
+      TZ: UTC
+      TERM: xterm-256color
+    volumes:
+      - openclaw_state:/home/node/.openclaw
+      - openclaw_auth_secrets:/home/node/.config/openclaw
+    configs:
+      - source: openclaw_seed
+        target: /etc/openclaw-seed.sh
+        mode: 0755
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "127.0.0.1:18789:18789"
+    init: true
+    restart: unless-stopped
+    entrypoint:
+      - sh
+      - /etc/openclaw-seed.sh
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:18789/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 60s
+    labels:
+      - "traefik.http.routers.openclaw-gateway.priority=1000"
+      - "secret-claw.deployment_id=__DEPLOYMENT_ID__"
+
+volumes:
+  openclaw_state:
+  openclaw_auth_secrets:
+
+configs:
+  openclaw_seed:
+    content: |
+      #!/bin/sh
+      # Seeds /home/node/.openclaw on first boot from base64 blobs rendered
+      # into this script by scripts/render.py. Idempotent: if openclaw.json
+      # already exists, skips the seed step. Paths are hardcoded (rather than
+      # using a shell var) because docker-compose interpolates $-prefixed
+      # tokens inside configs.content at parse time.
+      set -eu
+      if [ ! -f /home/node/.openclaw/openclaw.json ]; then
+        echo "[seed] populating /home/node/.openclaw"
+        mkdir -p /home/node/.openclaw/cron /home/node/.openclaw/agents/main/workspace /home/node/.openclaw/agents/routines/workspace /home/node/.openclaw/logs
+        base64 -d > /home/node/.openclaw/openclaw.json <<'OPENCLAW_JSON_B64_EOF'
+      __OPENCLAW_JSON_B64__
+      OPENCLAW_JSON_B64_EOF
+        base64 -d > /home/node/.openclaw/cron/jobs.json <<'CRON_JOBS_B64_EOF'
+      __CRON_JOBS_B64__
+      CRON_JOBS_B64_EOF
+        base64 -d > /home/node/.openclaw/agents/main/workspace/AGENTS.md <<'AGENTS_MD_B64_EOF'
+      __AGENTS_MD_B64__
+      AGENTS_MD_B64_EOF
+        base64 -d > /home/node/.openclaw/agents/main/workspace/IDENTITY.md <<'IDENTITY_MD_B64_EOF'
+      __IDENTITY_MD_B64__
+      IDENTITY_MD_B64_EOF
+        base64 -d > /home/node/.openclaw/agents/main/workspace/SOUL.md <<'SOUL_MD_B64_EOF'
+      __SOUL_MD_B64__
+      SOUL_MD_B64_EOF
+        base64 -d > /home/node/.openclaw/agents/main/workspace/USER.md <<'USER_MD_B64_EOF'
+      __USER_MD_B64__
+      USER_MD_B64_EOF
+        chown -R 1000:1000 /home/node/.openclaw
+        echo "[seed] done"
+      else
+        echo "[seed] /home/node/.openclaw/openclaw.json already present, skipping"
+      fi
+      exec runuser -u node -- tini -s -- node /app/openclaw.mjs gateway --bind lan --port 18789
