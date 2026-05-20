@@ -2,24 +2,27 @@
 
 ## Status
 
-**v0.2 SKELETON (restructured for v0.7 single-form + two-view product surface).**
-Full design content gets filled in via design conversation with
-Garbonzo. This document captures what each section/view needs to do,
-the UX questions to resolve, and the cross-cutting decisions that
-affect the whole product.
+**v0.3 SKELETON (aligned with v0.8 product surface).** Full design
+content gets filled in via design conversation with Garbonzo. This
+document captures what each section/view needs to do, the UX questions
+to resolve, and the cross-cutting decisions that affect the whole
+product.
 
 Decisions made during the design conversation get folded into the
 relevant section's "Design decisions" subsection and copy goes into
 "Copy". The skeleton's questions can be edited or struck through as
 they're resolved; they're agenda items, not requirements.
 
-The v0.1 skeleton organized this around a six-screen wizard flow; v0.2
-restructures around the v0.7 product surface — a single-form
-configuration page (`/create-agent`) plus an agent detail page
-(`/agents/<deployment_id>`) plus a minimal `/agents` list page. Most
-questions from v0.1 carry forward, adapted to the new structure;
-screen-flow questions specific to multi-step navigation have been
-dropped or absorbed.
+Version history of this skeleton:
+
+- **v0.1:** Six-screen multi-step wizard structure (pre-v0.7 pivot;
+  uncommitted).
+- **v0.2:** Restructured for v0.7 single-form + two-view + minimal
+  list page surface.
+- **v0.3:** Updated for v0.8. `/agents` list page dropped (header link
+  becomes "Back to portal"); async portal handler pattern locked to
+  Vercel's `waitUntil`; related session-tracking and direct-URL
+  access questions removed.
 
 ---
 
@@ -27,13 +30,17 @@ dropped or absorbed.
 
 Two-view Next.js (App Router) application:
 
-- `/create-agent` — single scrollable configuration form with five sections
-  (Tier / SecretAI Key / Anthropic Key / Telegram / Submit). Progressive
-  in-place validation; no inter-section navigation gates.
+- `/create-agent` — single scrollable configuration form with five
+  sections (Tier / SecretAI Key / Anthropic Key / Telegram / Submit).
+  Progressive in-place validation; no inter-section navigation gates.
 - `/agents/<deployment_id>` — agent detail page mirroring the SecretAI
   portal's VM detail page, with Overview + Logs tabs.
-- `/agents` — minimal list page serving as the entry point (where
-  "Your Agents" in the header lands).
+
+The wizard does not include an "agents list" view of its own (dropped
+at v0.8). The header's "Back to portal" link points at
+https://secretai.scrtlabs.com — the SecretAI portal's authoritative
+VM list is the cross-session fleet view, since agents are real VMs in
+the user's portal account.
 
 Authentication to the SecretAI portal is via API-key bearer auth: the
 user generates an API key in the portal, pastes it into the form's
@@ -48,19 +55,24 @@ single-hop forwarder: it receives the user's bearer token in the
 request, attaches it to the upstream call, returns the response, and
 forgets the token. No persistence of user credentials.
 
-Deployment record lifecycle (locked at v0.6): the wizard frontend
-generates the `deployment_id` (uuid), POSTs to `/api/record-deployment`
-with status="submitted" *before* the portal `vm-create` call, then
-navigates the browser to `/agents/<deployment_id>` immediately. The
-backend submits to the portal in parallel and PATCHes the deployment
-record's status as portal job polling progresses. The detail page
-polls the local backend (not the portal) for status transitions.
+Deployment record lifecycle (locked at v0.6, refined at v0.8): a
+single `POST /api/portal/submit-deployment` endpoint owns both the
+record creation and the portal interaction. It generates the
+`deployment_id`, inserts the deployment row with status="submitted"
+synchronously, schedules the portal call via Vercel's `waitUntil`
+(see "Async portal handler pattern" below), and returns the
+`deployment_id` to the browser before the slow portal work begins.
+The frontend gets the `deployment_id` in <100ms and navigates to
+`/agents/<deployment_id>` immediately; the detail page polls the
+local backend's deployment record (not the portal) and renders
+Provisioning state until the `waitUntil` continuation finishes the
+portal work and updates the record.
 
 Canonical references:
 
-- `docs/secret-claw-v1-demo-scope.md` (v0.7) — product scope, success
+- `docs/secret-claw-v1-demo-scope.md` (v0.8) — product scope, success
   criteria, non-goals
-- `docs/secret-claw-v1-build-plan.md` (v0.7) — build sequence,
+- `docs/secret-claw-v1-build-plan.md` (v0.8) — build sequence,
   estimates, component list, decisions
 - `wizard/prototypes/api-validation/FINDINGS.md` — empirical API
   behavior
@@ -83,9 +95,10 @@ information density. The wizard reads as a contiguous extension of
 the portal, not as a separate product.
 
 Honest scope on chrome: the wizard ships a minimal portal-style header
-(SecretAI logo + page title + "Your Agents" link) but explicitly does
-NOT recreate the full portal sidebar, profile dropdown, or balance
-indicator — those reflect concepts the wizard has no equivalent for.
+(SecretAI logo + page title + "Back to portal" link pointing at
+https://secretai.scrtlabs.com) but explicitly does NOT recreate the
+full portal sidebar, profile dropdown, balance indicator, or VM-fleet
+list — those reflect concepts the wizard has no equivalent for.
 
 **Open sub-questions:**
 
@@ -102,15 +115,15 @@ indicator — those reflect concepts the wizard has no equivalent for.
   (lucide / heroicons / custom) and weight.
 - Fidelity criteria — how do we judge "indistinguishable enough"?
   Side-by-side screenshots, a checklist of components, an external
-  reviewer comparing pages? See Open Question 3 below.
+  reviewer comparing pages? See Open Question 1 below.
 
 ---
 
 ## View 1: `/create-agent` (single configuration form)
 
-The user lands on this page (either via direct link or via `/agents`
-empty-state CTA), fills out the form section by section with
-progressive in-place validation, and clicks "Create" at the bottom to
+The user lands on this page directly (the wizard's root entry point
+redirects `/` here). They fill out the form section by section with
+progressive in-place validation, and click "Create" at the bottom to
 submit.
 
 Layout: vertically stacked sections inside a centered container width
@@ -378,10 +391,11 @@ captured, or user has explicitly skipped via the selection card.
 
 ### Section 5: Submit ("Create" button)
 
-**Purpose:** User clicks "Create" to deploy. The wizard frontend
-generates the `deployment_id`, POSTs to `/api/record-deployment`,
-then navigates the browser to `/agents/<deployment_id>` while the
-backend submits to the portal in parallel.
+**Purpose:** User clicks "Create" to deploy. The wizard calls a single
+backend endpoint (`POST /api/portal/submit-deployment`) which creates
+the deployment record synchronously, schedules the portal interaction
+via `waitUntil`, and returns the `deployment_id`. The browser
+navigates immediately to `/agents/<deployment_id>`.
 
 **Required state coming in:** All previous sections in valid state
 (Tier selected, SecretAI key valid, Anthropic key valid, Telegram
@@ -400,18 +414,28 @@ either enabled+valid or skipped).
 **Validation:** Button enablement is the validation surface — Create
 is disabled until all required sections show `valid ✓`.
 
+**Submit handler choreography (locked at v0.8 — `waitUntil`):** the
+endpoint creates the deployment record synchronously and returns the
+`deployment_id` in <100ms (no waiting for the slow portal call). The
+`waitUntil` continuation runs the portal interaction (render compose,
+multipart POST to portal `/api/vm/create`, poll
+`/api/background-job/<jobId>`) after the response has been sent. See
+build plan Chunk 3's "Async portal handler pattern" section for the
+concrete shape.
+
 **Error states:**
 
 - Pre-submit: button is disabled because a required section isn't valid
-- `POST /api/record-deployment` fails (network / backend down) — user
-  remains on `/create-agent` with the form state intact and an error
-  message
-- (Portal submission failures happen *after* navigation to
-  `/agents/<deployment_id>`; they surface there, not here)
+- `POST /api/portal/submit-deployment` itself fails (network / backend
+  down) — user remains on `/create-agent` with the form state intact
+  and an error message
+- (Portal submission failures inside the `waitUntil` continuation
+  happen *after* navigation to `/agents/<deployment_id>`; they surface
+  there as Failed state, not here)
 
-**Success criteria:** `/api/record-deployment` returns ok; browser
-navigates to `/agents/<deployment_id>`; the user no longer sees the
-form.
+**Success criteria:** `/api/portal/submit-deployment` returns a
+`deployment_id`; browser navigates to `/agents/<deployment_id>`; the
+user no longer sees the form.
 
 **Key UX questions to resolve:**
 
@@ -419,14 +443,15 @@ form.
    (tooltip on hover, sub-label "Complete X and Y to enable"), or do
    we rely on inline validation indicators inside each section to
    communicate "you still need to do X"?
-2. Submit-then-navigate choreography: there's a ~100-500ms gap between
-   the user clicking Create and the browser landing on
-   `/agents/<deployment_id>`. What's shown during that gap — a button
+2. Submit-then-navigate UX: the endpoint returns the `deployment_id`
+   in <100ms, but DNS / SSL / Next.js route transition still adds
+   perceptible latency. What's shown during that gap — a button
    spinner ("Creating..."), an overlay, an inline progress bar, or
    nothing (instant button state change followed by route transition)?
-3. What if `/api/record-deployment` itself fails (backend down)? Where
-   does the user end up — stays on the form with a banner error, gets
-   a modal, or something else? Retry pattern?
+3. What if `POST /api/portal/submit-deployment` itself fails (backend
+   down, database unreachable, network blip)? Where does the user end
+   up — stays on the form with a banner error, gets a modal, or
+   something else? Retry pattern?
 4. Sticky button (always visible at bottom of viewport on scroll) or
    inline-only (only visible when the user scrolls to the bottom)?
    What does the portal do for its "Create New SecretVM" primary
@@ -453,7 +478,7 @@ The page polls `GET /api/deployment-status/<deployment_id>` on a
 short interval while status is `submitted` or `provisioning`, then
 stops once status becomes terminal.
 
-Layout: portal-style page header (logo + page title + "Your Agents"
+Layout: portal-style page header (logo + page title + "Back to portal"
 link) above a centered content area mirroring the portal's VM detail
 page. Title shows the agent name; subtitle area shows the StatusPill
 (Provisioning / Running / Failed). Below the title is a TabStrip with
@@ -591,51 +616,6 @@ are any pre-boot logs (e.g. compose-rendering errors), surface them.
 
 ---
 
-## Entry list page: `/agents` ("Your Agents")
-
-Minimal list of deployments owned by the current session. Serves as
-the "Your Agents" link target in the header.
-
-**Empty state:** Most common state for first-time users — friendly
-message + prominent "Create New Agent" CTA that goes to
-`/create-agent`.
-
-**Populated state:** List of deployments (rows). Each row links to
-the corresponding `/agents/<deployment_id>` detail page.
-
-**Required state coming in:** A way of knowing which deployments
-belong to "this user" given the wizard has no persistent user concept.
-Likely localStorage of `deployment_id`s the user has created in this
-browser — TBD (see UX question 1).
-
-**Inputs:** None — purely a list view.
-
-**Key UX questions to resolve:**
-
-1. How does `/agents` know which deployments belong to the current
-   user with no persistent user concept? Options: localStorage of
-   `deployment_id`s; browser-session cookie; ignore the question and
-   show no list (rely on the user keeping their URLs). Trade: more
-   persistence = better UX but more state in the browser.
-2. Row content — what fields per row? Agent name, status pill,
-   creation timestamp, deployment ID? Mirror the portal's VM list row
-   structure.
-3. Sort order — newest first, oldest first, status-grouped?
-4. Failed deployments in the list — clickable (goes to detail page
-   showing the failure), or hidden / collapsed?
-5. Bulk actions (delete, etc.) — out of scope for demo? (Yes,
-   probably — the portal handles real VM lifecycle.)
-6. Empty state copy — what's the framing? Match the portal's
-   empty-list pattern for VM lists.
-7. Pagination / infinite scroll — out of scope for demo (typical
-   demo user has 0-3 deployments)?
-
-**Design decisions (filled during conversation):** TBD via design conversation.
-
-**Copy (filled during conversation):** TBD via design conversation.
-
----
-
 ## Cross-cutting design decisions
 
 ### Component primitives (matching the SecretAI portal)
@@ -645,12 +625,14 @@ the views. Listed here so the design conversation can lock their
 visual contracts before implementation.
 
 **`PortalHeader`** — top-of-page strip with logo + product wordmark
-(left), page title (center, optional), "Your Agents" link (right).
+(left), page title (center, optional), "Back to portal" link (right)
+pointing at https://secretai.scrtlabs.com.
 
 - Open: exact-match logo asset (svg / png / inline)?
 - Open: page title visual treatment (matches portal's page title
   styling on detail pages)?
-- Open: "Your Agents" link styling — text-only, icon + text, dropdown?
+- Open: "Back to portal" link styling — text-only, icon + text,
+  external-link icon?
 
 **`SelectionCard`** — bordered card with title, description, optional
 indicator, optional "coming soon" greyed variant. Used for tier
@@ -719,41 +701,61 @@ friendly variants? Icon supplementation?).
 
 ### Navigation between views
 
-**Question:** How does the user move between `/create-agent`,
-`/agents`, and `/agents/<id>`?
+**Question:** How does the user move between the two views?
 
-- "Your Agents" header link → `/agents`
-- `/agents` empty-state CTA / populated-state "+ Create New Agent" →
-  `/create-agent`
-- `/agents` row click → `/agents/<id>`
-- `/create-agent` submit → `/agents/<id>`
-- `/agents/<id>` Failed-state "Try again" → `/create-agent`
+- `/create-agent` submit → `/agents/<deployment_id>` (via `waitUntil`
+  submit handler)
+- `/agents/<deployment_id>` Failed-state "Try again" → `/create-agent`
+- Header "Back to portal" link (any view) → https://secretai.scrtlabs.com
+  (external)
 
 Sub-questions:
 
-- Does the browser back button respect these transitions sensibly
-  (e.g., back from `/agents/<id>` after submit goes to `/create-agent`
-  with form state lost — confirm that's expected and there's no
-  attempt to restore form state)?
-- Is there a "Cancel" or "Back" link inside `/create-agent` that
-  goes to `/agents`? Or only the header link?
+- Browser back button from `/agents/<deployment_id>` to
+  `/create-agent` after submit — form state is lost (no
+  localStorage persistence of credentials). Confirm that's expected
+  and we don't try to restore form state from history.
+- Is there a "Cancel" or "Back to portal" inline action elsewhere on
+  `/create-agent`, or only the header link?
 
 ### Portal proxy endpoints
 
 **Question:** Route structure for the Next.js API proxy. Mostly
-settled at v0.5-v0.6 in the build plan; details to confirm:
+settled at v0.5-v0.8 in the build plan; details to confirm:
 
 - Path convention: `/api/portal/validate-key`,
-  `/api/portal/vm-create`, `/api/portal/job-status/[jobId]`,
-  `/api/portal/templates`?
+  `/api/portal/submit-deployment`, `/api/deployment-status/[id]`?
 - How is the bearer token forwarded — `Authorization` header
   passthrough, or explicit body parameter that the proxy attaches to
   the upstream `Authorization` header?
 - Single-hop forwarding only, never persisted — enforced in code
   (no logging of credential-carrying request bodies, no caching, no
   telemetry capture).
-- Where do compose-rendering errors surface — as a 4xx from the proxy
-  with a structured error body, or do we let them bubble?
+- Where do compose-rendering errors surface — as a Failed-state row
+  in the deployment record (from inside the `waitUntil` handler),
+  with the error message visible on the detail page?
+
+### Async portal handler pattern (waitUntil)
+
+**Settled at v0.8: Vercel's `waitUntil` API keeps the serverless
+function alive after the response is sent.** The
+`/api/portal/submit-deployment` endpoint creates the deployment record
+synchronously and returns `{ deployment_id }` to the browser in
+<100ms; the slow portal interaction (render compose, multipart POST,
+poll background-job) runs inside the `waitUntil` continuation. See
+build plan Chunk 3 for the concrete shape.
+
+Fallback documented in build plan Chunk 4 (polling-driven progression
+where `GET /api/deployment-status/<id>` kicks off the portal call on
+first observed `submitted` row). Not built preemptively.
+
+Open sub-question:
+
+- How do we verify `waitUntil` survives long enough on Vercel's
+  runtime for our ~5 minute portal polling? Vercel's docs are vague
+  on the upper bound. Worth a small Chunk 3 smoke test: deploy a
+  no-op endpoint that schedules a `waitUntil` with a 5+ minute
+  timer + logging, observe whether it completes.
 
 ### Compose rendering
 
@@ -777,15 +779,6 @@ user reloads `/create-agent`? Scope doc says state is lost on reload
 (no persistence of sensitive credentials); the implementation choice
 shouldn't fight that.
 
-### Session-based deployment tracking for `/agents`
-
-**Question:** Since the wizard has no persistent user concept, how
-does `/agents` show "your" deployments? Likely localStorage of
-`deployment_id`s as they're created, but: cleared on browser data
-purge, lost on private mode, doesn't sync across devices. Are those
-acceptable trade-offs for the demo? Worth deciding here rather than
-discovering in Chunk 3.
-
 ---
 
 ## Open questions for design conversation (whole-product)
@@ -800,7 +793,8 @@ These don't fit a specific section/view but affect the whole product:
 2. **Portal API unreachable mid-flow.** Bail out with a clear
    message, retry with backoff, or queue the submission for later?
    Different answers for the validation calls (Section 2) vs the
-   submission call (Section 5) vs the polling calls (View 2)?
+   submission call (Section 5 → `waitUntil` continuation) vs the
+   polling calls (View 2)?
 3. **Telemetry policy.** Scope doc's non-goals say "no analytics."
    Does that include uncaught JavaScript errors / unhandled promise
    rejections (Sentry-style)? Strict no, or quiet yes for ops?
@@ -818,17 +812,11 @@ These don't fit a specific section/view but affect the whole product:
    identity hook, we may want to revisit the no-identity stance on
    Section 2. Non-blocking for the design conversation; flagging for
    awareness.
-7. **Direct-URL access to `/agents/<deployment_id>`.** If a user
-   bookmarks their detail-page URL and returns later (from a different
-   device, or after clearing localStorage), the page should still
-   work — the backend returns the deployment record, the page renders.
-   Confirm this is desired (a deployment_id is a soft-private
-   resource: anyone with the URL can see it, but URLs are uuids and
-   not enumerable). Or do we add some kind of access guard?
-8. **Submit-then-navigate UX gap.** ~100-500ms between Create click
-   and detail-page render — does this need an intermediate state
-   ("Creating...") or is the route transition fast enough that
-   nothing extra is needed?
+7. **`waitUntil` reliability verification.** The v0.8 async handler
+   pattern relies on Vercel's `waitUntil` surviving for the full
+   provisioning window (~5 minutes). Worth an early Chunk 3 smoke
+   test to confirm before building the full submit handler around it.
+   See "Async portal handler pattern" cross-cutting section.
 
 ---
 
@@ -840,8 +828,8 @@ This is a recommendation, not a constraint:
    criteria, component primitives (PortalHeader, SelectionCard,
    StatusPill, FormSection, TabStrip, LogsView, ValidationIcon),
    validation patterns, error/loading patterns, navigation between
-   views. These constrain every section and every view, and saves
-   repeating the same conversation eight times.
+   views. These constrain every section and every view, and save
+   repeating the same conversation seven times.
 2. **Section 2 (SecretAI key)** — most consequential form section.
    The walkthrough copy, error handling, and "no identity to show"
    treatment shape the form's character. If this section is right,
@@ -857,20 +845,21 @@ This is a recommendation, not a constraint:
    (BotFather walkthrough, two fields, optional path, selection-card
    pattern for enable/skip). Resolve after the simpler sections.
 6. **Section 5 (Submit)** — small but important: button enablement,
-   submit-then-navigate UX, error path for record-deployment failure.
+   submit-then-navigate UX, error path for submit-endpoint failure.
+   The async-handler architecture is settled at v0.8 (waitUntil), so
+   this conversation focuses on the user-visible UX rather than the
+   handler's internal shape.
 7. **Section 3 (Anthropic key)** and **Section 1 (Tier)** — simplest
    sections; can be decided quickly once the cross-cutting decisions
    and the harder sections have settled the patterns.
-8. **Entry list page (`/agents`)** — depends on the session-tracking
-   decision (whole-product Open Question 7 in spirit, captured in
-   Cross-cutting "Session-based deployment tracking"). Resolve after
-   the other sections so the list's row format mirrors the established
-   detail-page treatment.
 
 The whole-product Open Questions belong either at the start
 (alongside cross-cutting) or at the end (sweep remaining); the
 Position A fidelity-criteria question is the most important one to
-land early because it affects every visual decision downstream.
+land early because it affects every visual decision downstream. The
+`waitUntil` reliability verification (Open Question 7) is a Chunk 3
+smoke-test concern more than a design-conversation concern, but
+flagged so it's not forgotten.
 
 ---
 
@@ -878,6 +867,6 @@ land early because it affects every visual decision downstream.
 
 The filled-in version of this document becomes the input to Chunk 3
 (wizard frontend build). Claude Code reading this document plus the
-v0.7 scope doc plus the v0.7 build plan plus FINDINGS.md should have
+v0.8 scope doc plus the v0.8 build plan plus FINDINGS.md should have
 enough specificity to implement the frontend without making product
 decisions.

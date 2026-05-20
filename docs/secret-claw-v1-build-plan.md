@@ -1,6 +1,6 @@
 # Secret Claw v1 Demo — Build Plan
 
-**Status:** Working document, May 20 2026 (v0.7)
+**Status:** Working document, May 20 2026 (v0.8)
 **Companion to:** `secret-claw-v1-demo-scope.md`
 **Purpose:** Define the engineering execution path from current state to "Internal testers have used the demo." Sequences the work, identifies dependencies, captures decisions that affect the build but not the product surface.
 
@@ -18,6 +18,7 @@ What exists:
 - **SecretAI portal API research** at `C:\dev\secret-claw\docs\secretvm-provisioning-research.md`. Confirms Pattern B is achievable: provisioning is a multipart HTTP POST to `/api/vm/create`.
 - **API-key auth path validated** by user (May 19): API keys can be generated in the SecretAI portal UI and used for `vm create` operations via `Authorization: Bearer <key>`.
 - **Design conversation produced the v0.7 structural pivot** (May 20): wizard restructured from a six-screen multi-step flow to a single-form configuration page plus a dedicated agent detail page, mirroring the SecretAI portal's "Create New SecretVM" and "VM detail" page patterns. Position A visual alignment (portal's full design language, minimal chrome — header only). The existing `docs/wizard-design.md` skeleton (Chunk 2 Part 2 output, currently uncommitted) needs restructuring to reflect the section-based structure rather than per-screen sections; that restructure happens before Chunk 3 implementation begins.
+- **v0.8 follow-up decisions** (May 20): `/agents` list page dropped from scope (header link becomes "Back to portal" → https://secretai.scrtlabs.com); async portal handler pattern locked to Vercel's `waitUntil` with polling-driven progression as documented fallback; README updated to remove stale Keplr-auth language.
 
 What doesn't exist:
 
@@ -101,16 +102,17 @@ The bearer token never persists in the proxy. Each route is single-hop: receive 
 
 **Deployment-record lifecycle (locked at v0.6):** the deployment record is created at *wizard submission time*, not at provisioning completion. The wizard frontend generates the `deployment_id` (uuid) before any portal call, POSTs to the backend's `/api/record-deployment` with status="submitted", *then* navigates the browser to `/agents/<deployment_id>` while the backend submits to the portal in parallel. As `GET /api/portal/job-status/[jobId]` polling progresses on the backend, it PATCHes the deployment record's status through `submitted → provisioning → ready` (or `→ failed` with `error_message`). The agent detail page polls the local backend's deployment status (not the portal directly) — cleaner separation, and failed deploys persist as observable rows.
 
-**Routes (v0.7 structure):**
+**Routes (v0.8 structure):**
 
-- `/` — redirects to `/create-agent` (or `/agents` for return visitors with prior deployments in session storage; TBD in design)
+- `/` — redirects to `/create-agent`
 - `/create-agent` — single-page configuration form (View 1)
-- `/agents` — minimal list of deployments owned by the current session (entry point that ties to "Your Agents" in the header)
 - `/agents/<deployment_id>` — agent detail page (View 2) with Overview + Logs tabs
+
+(v0.7 included a `/agents` list page; dropped at v0.8 — see scope doc v0.8 explicit non-goals and decision history.)
 
 **UI components to build (matching the SecretAI portal's design language — Position A):**
 
-- **PortalHeader** — top-of-page branding strip: SecretAI logo + product wordmark on the left, page title centered (matches portal's pattern), "Your Agents" link on the right. Used on every page. Honest minimal chrome — no sidebar, no profile dropdown, no balance indicator. Visual matching: same heights, paddings, typography weight, and color palette (dark mode, orange-red accent).
+- **PortalHeader** — top-of-page branding strip: SecretAI logo + product wordmark on the left, page title centered (matches portal's pattern), "Back to portal" link on the right pointing at https://secretai.scrtlabs.com. Used on every page. Honest minimal chrome — no sidebar, no profile dropdown, no balance indicator. Visual matching: same heights, paddings, typography weight, and color palette (dark mode, orange-red accent).
 - **SelectionCard** — the portal's selection-card pattern: bordered card with title, description, optional radio/checkbox indicator, optional "coming soon" greyed variant. Used for tier selection (BYO / Secret) and Telegram-enable toggle.
 - **StatusPill** — small rounded pill with status color: yellow/orange for "Provisioning," green for "Running," red for "Failed." Matches the portal's status-pill component on its VM list/detail pages.
 - **FormSection** — section wrapper used to lay out `/create-agent`'s vertically-stacked sections: section title, helper text, inputs, inline validation feedback (`valid ✓` / error messages).
@@ -120,16 +122,46 @@ The bearer token never persists in the proxy. Each route is single-hop: receive 
 
 The frontend implements:
 
-- The four routes above with proper navigation between them
+- The three routes above with proper navigation between them
 - Progressive in-place validation in `/create-agent`: each section reaches `valid ✓` independently (no advance-to-next gating)
 - SecretAI API key validation via `POST /api/portal/validate-key` (proxy route → portal `GET /api/vm/instances`)
 - Real-time API key validation for Anthropic (test call before showing `valid ✓`)
 - Real-time Telegram credential validation (getMe call to Telegram before showing `valid ✓`)
-- Frontend-generated `deployment_id` (uuid) and POST to `/api/record-deployment` at the moment the user clicks "Create" on `/create-agent`
-- Multipart submission to the portal via `POST /api/portal/vm-create` (the proxy route renders the compose server-side from the user inputs via the Node renderer) — triggered server-side as part of the same submit handler so the browser-side navigation can happen immediately
-- Navigation to `/agents/<deployment_id>` immediately after the deployment record is created
+- A single submit endpoint (`POST /api/portal/submit-deployment`) that the frontend calls when the user clicks "Create." See the async-handler section below for the choreography.
+- Navigation to `/agents/<deployment_id>` immediately after the submit endpoint returns the `deployment_id`
 - Polling `GET /api/deployment-status/<deployment_id>` from the detail page while status is `submitted` or `provisioning` (~3s interval). When the response transitions to `ready` or `failed`, the page updates in place and polling stops.
 - Mobile responsive layouts that match the portal's responsive behavior
+
+**Async portal handler pattern (locked at v0.8 — `waitUntil`):** The submit endpoint creates the deployment record synchronously and returns the `deployment_id` to the browser before the slow portal interaction begins. The backend continues the portal call asynchronously using Vercel's `waitUntil` API (https://vercel.com/docs/functions/functions-api-reference#waituntil), which keeps the serverless function alive after the response has been sent. Concrete shape:
+
+```typescript
+// POST /api/portal/submit-deployment
+export async function POST(request: Request) {
+  const formData = await request.json();
+  const deploymentId = generateUUID();
+
+  // Synchronous: create the record so the detail page has something to poll
+  await db.deployments.insert({
+    deployment_id: deploymentId,
+    status: 'submitted',
+    // ... tier, telegram_enabled, gateway_token, timestamps
+  });
+
+  // Async continuation — survives past the Response below
+  waitUntil(handlePortalProvisioning(deploymentId, formData));
+
+  return Response.json({ deployment_id: deploymentId });
+}
+
+async function handlePortalProvisioning(deploymentId, formData) {
+  await db.deployments.update(deploymentId, { status: 'provisioning' });
+  // Render compose, POST to portal /api/vm/create with bearer auth
+  // Poll /api/background-job/<jobId> until terminal
+  // PATCH deployment record with vm_id, vm_hostname, status='ready' or 'failed'
+}
+```
+
+The frontend gets its `deployment_id` in <100ms and navigates the browser to `/agents/<deployment_id>` immediately; the detail page polls the deployment record and renders Provisioning state until `waitUntil` finishes the portal work and updates the record. See Chunk 4 below for the documented fallback if `waitUntil` proves unreliable.
 
 The `getCurrentUser()` abstraction lives here — returns `{deploymentId: <wizard-generated-uuid>, secretAiApiKey}` after the user pastes their key. Swappable for production auth later. Used in any place the code needs to know "who is this submission for."
 
@@ -153,12 +185,13 @@ API endpoints the wizard calls:
 
 - `POST /api/validate-anthropic-key` — tests an Anthropic key with a one-token call, returns ok or invalid (lightweight backend service; doesn't store the key)
 - `POST /api/validate-telegram` — tests a Telegram bot token with a getMe call, returns ok with bot username, or invalid
-- `POST /api/record-deployment` — accepts the wizard-generated `deployment_id` and a small payload of non-sensitive metadata (telegram_enabled flag, tier, gateway_token, timestamp). Creates the initial row with status="submitted". **Called at wizard submission time, before the portal `vm-create` call** — so even if portal submission fails the deployment row exists for owner observability *and* for the agent detail page to render at `/agents/<deployment_id>` immediately on navigation.
-- `PATCH /api/deployment-status/:deployment_id` — updates the deployment record's status as the wizard's polling progresses. Status transitions: `submitted → provisioning → ready` or `submitted → provisioning → failed`. The `failed` patch carries an `error_message`. The `ready` patch carries the `vm_id`, `vm_hostname`, and `telegram_bot_username` (if Telegram was enabled) returned by the portal.
+- `POST /api/portal/submit-deployment` — the synchronous half of the v0.8 async-handler pattern. Generates the `deployment_id`, inserts the deployment row with status="submitted" (plus tier, telegram_enabled, gateway_token, timestamps), schedules the portal interaction via `waitUntil`, and returns `{ deployment_id }` to the browser. **Internally** this endpoint also owns the portal proxy work (rendering the compose, calling `/api/vm/create`, polling `/api/background-job/<jobId>`, PATCHing the deployment record) — but that work runs inside the `waitUntil` continuation, after the HTTP response is returned to the frontend.
+- `PATCH /api/deployment-status/:deployment_id` — updates the deployment record's status as the `waitUntil` continuation's polling progresses. Status transitions: `submitted → provisioning → ready` or `submitted → provisioning → failed`. The `failed` patch carries an `error_message`. The `ready` patch carries the `vm_id`, `vm_hostname`, and `telegram_bot_username` (if Telegram was enabled) returned by the portal. (Used internally by the `waitUntil` handler; not called by the browser directly.)
 - `GET /api/deployment-status/:deployment_id` — returns the deployment record's current state. The agent detail page polls this (not the portal directly) while status is `submitted` or `provisioning`. When status is `ready`, the response includes `vm_hostname`, `gateway_token`, `telegram_bot_username` (if applicable), `created_at`, and the rest of the row's non-sensitive fields — everything the detail page needs to render the Ready state. When status is `failed`, the response includes `error_message`. Useful for owner observability as well.
-- `GET /api/deployments` — returns the list of deployments owned by the current session (TBD: keyed by browser-session deployment_ids stored in localStorage, or some lighter mechanism). Backs the minimal `/agents` list page.
 
 SecretAI API key validation does NOT have a backend endpoint — that validation happens via the Next.js portal proxy hitting the SecretAI portal directly. The wizard backend never sees the user's SecretAI key. This keeps user credentials out of our persistent infrastructure entirely.
+
+**Async-handler fallback (documented, not implemented preemptively):** if Vercel's `waitUntil` proves unreliable on the runtime we deploy to — e.g. the continuation is killed before portal polling completes, or the cold-start gap eats the window — fall back to polling-driven progression: when `GET /api/deployment-status/<id>` is called and the row's status is still `submitted`, the GET handler itself kicks off the portal call (idempotent — guarded by a status check inside a transaction). The detail page's natural polling drives the work forward. Trade: cold-start latency on first poll, slightly more code on the GET path. We don't build this preemptively; we'd only switch if `waitUntil` doesn't survive a real-world test.
 
 The owner-side observability includes:
 - A read-only dashboard showing recent deployments (status, hostname, timestamp)
@@ -212,7 +245,11 @@ Architecture simplified again: API-key bearer auth instead of Keplr-in-wizard si
 
 **Python `render.py` vs Node port for the wizard backend.** **Settled at v0.6: Node port.** The wizard backend is Node already; shelling out to Python adds a runtime dependency that complicates Vercel deployment and introduces a subprocess boundary across a small, well-defined transformation (templating + UUID + random token + YAML write). The existing `deploys/byo/scripts/render.py` remains as the canonical local CLI tool — useful for `deploys/byo/` testing, manual renders, and as the rendering reference. The wizard's Node renderer is held to byte-equivalent output against the same template + inputs (test fixtures under `wizard/tests/renderer/`, modulo intentionally-random fields).
 
-**Deployment-record creation timing.** **Settled at v0.6: at wizard submission time.** Earlier drafts left this ambiguous (record at completion vs at submission). Settled in favor of submission-time creation because failed provisioning needs to leave an observable row — if the record only existed on success, failed deploys would be invisible to the owner dashboard. Screen 5's status polling is also cleaner against the local backend than against the portal directly. The wizard frontend generates the `deployment_id` (uuid) and POSTs to `/api/record-deployment` *before* calling the portal's `vm-create`. Status flows through PATCHes as polling progresses.
+**Deployment-record creation timing.** **Settled at v0.6: at wizard submission time.** Earlier drafts left this ambiguous (record at completion vs at submission). Settled in favor of submission-time creation because failed provisioning needs to leave an observable row — if the record only existed on success, failed deploys would be invisible to the owner dashboard. Screen 5's status polling is also cleaner against the local backend than against the portal directly. The wizard frontend generates the `deployment_id` (uuid) and POSTs to `/api/record-deployment` *before* calling the portal's `vm-create`. Status flows through PATCHes as polling progresses. (Implementation note: at v0.8 the submission-time record creation moved server-side — the backend's submit endpoint owns both the record creation and the `deployment_id` generation. See the Async portal handler pattern in Chunk 3.)
+
+**Async portal handler pattern.** **Settled at v0.8: Vercel `waitUntil`.** The submit endpoint creates the deployment row synchronously and returns the `deployment_id` to the browser; the slow portal interaction (render compose, multipart POST, poll background job) continues asynchronously via `waitUntil`. Frontend gets instant navigation to the detail page; backend keeps working without holding the HTTP response open. See Chunk 3's "Async portal handler pattern" section for the concrete shape. Fallback documented in Chunk 4 (polling-driven progression) but not implemented preemptively.
+
+**Agents list page / fleet view in the wizard.** **Settled at v0.8: out of scope.** Solving "which deployments belong to this user" without a persistent user concept would require either localStorage scoping (breaks across browsers/private mode), API-key-hash scoping (real engineering for marginal demo value), or showing all deployments (privacy violation). The SecretAI portal already provides the authoritative cross-session fleet view — agents are real VMs in the user's portal account. The wizard's header "Back to portal" link is the path to that view. The agent detail page at `/agents/<deployment_id>` remains.
 
 **Specific SecretAI portal endpoint for API-key validation.** **Settled at v0.5: `GET /api/vm/instances` with `Authorization: Bearer <key>`.** Confirmed empirically — returns 200 with a VM list for valid keys, structured 401 for invalid/missing. `/api/auth/session` returns `{}` 200 regardless of bearer-token state (NextAuth quirk) and is unusable. See `wizard/prototypes/api-validation/FINDINGS.md` §2.
 
@@ -263,3 +300,4 @@ Structure as defined in the scope doc.
 - **v0.5 (May 19 2026):** Chunk 2 Part 1 (API validation prototype) complete, findings folded in. `/api/vm/instances` confirmed as validation endpoint. Next.js API-route proxy now a definite Chunk 3 component (portal serves no CORS, so direct browser calls are impossible). Compose-rendering decision settled: backend-side. No user-identity display possible. See commit 360e7ca for the prototype and `wizard/prototypes/api-validation/FINDINGS.md` for empirical detail.
 - **v0.6 (May 20 2026):** Two architecture decisions locked before Chunk 3 design conversation begins. (1) Deployment records are created at wizard submission time, not at provisioning completion — the wizard frontend generates the `deployment_id` and POSTs to `/api/record-deployment` before the portal `vm-create` call, then PATCHes status as polling progresses. Failed deploys persist for owner observability. Screen 5's status polling runs against the local backend, kept in sync from portal polling. (2) Compose rendering ports from Python to Node/TypeScript for the wizard backend; `deploys/byo/scripts/render.py` remains as the canonical local CLI tool. Both must produce byte-equivalent output for the same template + inputs (test fixtures cover, modulo intentionally-random fields).
 - **v0.7 (May 20 2026):** Structural pivot from design conversation. Wizard restructured from a six-screen multi-step flow to a single-page configuration form (`/create-agent`) plus a dedicated agent detail page (`/agents/<deployment_id>`) with Overview + Logs tabs, mirroring the SecretAI portal's "Create New SecretVM" and "VM detail" page patterns. Minimal `/agents` list page added as entry point. Position A visual alignment locked: wizard adopts the SecretAI portal's full design language (colors, type, components, spacing) but explicitly does not recreate the full portal chrome — minimal portal-style header only. Chunk 3's component list reframed around portal-matching primitives (PortalHeader, SelectionCard, StatusPill, FormSection, TabStrip, LogsView, ValidationIcon). Polling moves from the (now-deleted) provisioning screen to the agent detail page; transitions in place to Ready state. `gateway_token` added to the deployment record schema so the detail page can redisplay it on subsequent visits. Wizard-design.md skeleton from Chunk 2 Part 2 will be restructured to reflect section-based form structure before Chunk 3 implementation begins.
+- **v0.8 (May 20 2026):** Three follow-up decisions after v0.7. (1) Async portal handler pattern locked to Vercel's `waitUntil`: the submit endpoint creates the deployment record synchronously and returns the `deployment_id` to the browser; backend continues the portal interaction asynchronously via `waitUntil` (keeps serverless function alive after response). Polling-driven progression documented as fallback if `waitUntil` proves unreliable on Vercel's runtime, but not built preemptively. (2) `/agents` list page dropped from scope — solving "which deployments belong to this user" without a persistent user concept was disproportionate work for marginal demo value, and the SecretAI portal's VM list is the authoritative cross-session fleet view anyway. The "Your Agents" header link becomes "Back to portal" → https://secretai.scrtlabs.com. `GET /api/deployments` endpoint dropped. The detail page at `/agents/<deployment_id>` is unchanged. (3) README's stale "Keplr-authenticated user" opening language updated to reflect API-key bearer auth from the SecretAI portal.
