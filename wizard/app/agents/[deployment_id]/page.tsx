@@ -153,8 +153,18 @@ export default function AgentDetailPage({ params }: PageProps) {
               title="Basic info"
               rows={[
                 { label: "Agent name", value: "Secret Agent" },
-                { label: "Tier", value: "BYO API" },
-                { label: "Model", value: "Claude Sonnet 4.6", mono: true },
+                {
+                  label: "Tier",
+                  value: record.tier === "secret" ? "Secret (SecretAI)" : "BYO API",
+                },
+                {
+                  label: "Model",
+                  value:
+                    record.tier === "secret"
+                      ? "qwen3.5-uncensored-aggressive:27b"
+                      : "Claude Sonnet 4.6",
+                  mono: true,
+                },
                 {
                   label: "Telegram",
                   value: record.telegram_enabled ? "Connected" : "Skipped",

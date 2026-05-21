@@ -38,9 +38,17 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid JSON body" }, { status: 400 });
   }
 
-  if (!body.secretaiApiKey || !body.anthropicApiKey) {
+  const tier = body.tier === "secret" ? "secret" : "byo";
+
+  if (!body.secretaiApiKey) {
     return NextResponse.json(
-      { error: "secretaiApiKey and anthropicApiKey are required" },
+      { error: "secretaiApiKey is required" },
+      { status: 400 },
+    );
+  }
+  if (tier === "byo" && !body.anthropicApiKey) {
+    return NextResponse.json(
+      { error: "anthropicApiKey is required for BYO tier" },
       { status: 400 },
     );
   }
@@ -52,6 +60,7 @@ export async function POST(request: Request) {
   const record: DeploymentRecord = {
     deployment_id: deploymentId,
     status: "submitted",
+    tier,
     gateway_token: gatewayToken,
     telegram_enabled: telegramEnabled,
     telegram_bot_username: body.telegramBotUsername,
@@ -106,8 +115,11 @@ async function handlePortalProvisioning(opts: {
   try {
     await db.update(deploymentId, { status: "provisioning" });
 
+    const tier = form.tier === "secret" ? "secret" : "byo";
     const rendered = render({
-      anthropicApiKey: form.anthropicApiKey,
+      tier,
+      anthropicApiKey: tier === "byo" ? form.anthropicApiKey : undefined,
+      secretaiApiKey: tier === "secret" ? form.secretaiApiKey : undefined,
       telegramBotToken: form.telegramEnabled ? form.telegramBotToken : undefined,
       telegramChatId: form.telegramEnabled ? form.telegramChatId : undefined,
       deploymentId,

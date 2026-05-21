@@ -26,12 +26,13 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY wizard/. ./
-# Pre-populate ./templates from the canonical deploys/byo/templates source.
-# The npm `prebuild` hook (scripts/copy-templates.mjs) would also do this,
-# but its source path (../deploys/byo/templates/) doesn't exist in this
-# builder stage's filesystem. Copying here lets prebuild see ./templates
-# already populated and skip silently.
-COPY deploys/byo/templates ./templates
+# Pre-populate ./templates/<tier>/ from the canonical deploys/<tier>/templates
+# sources. The npm `prebuild` hook (scripts/copy-templates.mjs) would also do
+# this, but its source path (../deploys/) doesn't exist in this builder
+# stage's filesystem. Copying here lets prebuild see ./templates already
+# populated and skip silently.
+COPY deploys/byo/templates ./templates/byo
+COPY deploys/secret/templates ./templates/secret
 ENV NEXT_TELEMETRY_DISABLED=1
 RUN npm run build
 

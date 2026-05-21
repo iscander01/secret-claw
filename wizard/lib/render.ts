@@ -1,38 +1,54 @@
 /**
- * TypeScript port of `deploys/byo/scripts/render.py`.
+ * TypeScript renderer for Secret Claw deploy templates.
  *
- * Produces a single docker-compose.yml string that the wizard backend
- * submits to the SecretAI portal via `POST /api/vm/create`. Byte
- * equivalence with the Python renderer is enforced by `tests/render.test.ts`
- * (modulo intentionally-random fields: `deploymentId`, `gatewayToken`,
- * `welcomeAtIso`, and `vmHostname`, all of which the caller can pin via
- * RenderConfig for testing).
+ * Renders a docker-compose.yml string the wizard submits to the SecretAI
+ * portal via `POST /api/vm/create`. Supports two tiers:
  *
- * The deploy template at `../deploys/byo/templates/` is the canonical
- * source — this renderer does not modify it.
+ *  - "byo"    — Anthropic Claude Sonnet 4.6 inference. User brings their
+ *               own Anthropic API key. Baked into openclaw.json's anthropic
+ *               provider block.
+ *  - "secret" — SecretAI-hosted qwen3.5-uncensored:27b inference. Uses the
+ *               user's SecretAI portal API key (same key that auths the
+ *               vm/create call) for both the portal auth and the OpenClaw
+ *               → SecretAI inference calls.
+ *
+ * Template source: `../deploys/<tier>/templates/` (canonical, used by the
+ * Python renderer and the local CLI workflow for BYO). The
+ * `scripts/copy-templates.mjs` prebuild copies both tiers into
+ * `wizard/templates/<tier>/` so platforms whose build context is wizard-
+ * only (Vercel, Cloudflare) can find them.
  */
 
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-import type { RenderConfig, RenderResult } from "./types";
+import type { RenderConfig, RenderResult, Tier } from "./types";
 
-function resolveTemplatesDir(): string {
+function resolveTemplatesRoot(): string {
   if (process.env.SECRET_CLAW_TEMPLATES_DIR) {
     return path.resolve(process.env.SECRET_CLAW_TEMPLATES_DIR);
   }
-  // wizard/templates/ is populated by scripts/copy-templates.mjs at prebuild
-  // time. On Vercel / Cloudflare Pages / any host whose build context is
-  // wizard/-only, this is where the templates live. Falls back to the
-  // canonical ../deploys/byo/templates/ for local dev when prebuild hasn't
-  // run, matching where the Python renderer reads from.
+  // wizard/templates/ is populated by scripts/copy-templates.mjs at
+  // prebuild time. On Vercel, Cloudflare Pages, or any host whose build
+  // context is wizard/-only, this is where the templates live.
   const local = path.resolve(process.cwd(), "templates");
   if (fs.existsSync(local)) return local;
-  return path.resolve(process.cwd(), "..", "deploys", "byo", "templates");
+  // Fallback for local dev when prebuild hasn't run — read from the
+  // canonical deploys/ tree two levels up.
+  return path.resolve(process.cwd(), "..", "deploys");
 }
 
-const TEMPLATES_DIR = resolveTemplatesDir();
+const TEMPLATES_ROOT = resolveTemplatesRoot();
+
+function tierTemplatesDir(tier: Tier): string {
+  // Two layouts supported:
+  //  - wizard/templates/<tier>/                   (after prebuild copy)
+  //  - <repo>/deploys/<tier>/templates/           (canonical source)
+  const flat = path.join(TEMPLATES_ROOT, tier);
+  if (fs.existsSync(path.join(flat, "openclaw.json"))) return flat;
+  return path.join(TEMPLATES_ROOT, tier, "templates");
+}
 
 const HOSTNAME_RE = /^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,253}\.)+[a-zA-Z]{2,}$/;
 const HOSTNAME_WILDCARD_RE = /^\*\.([a-zA-Z0-9\-]+\.)+[a-zA-Z]{2,}$/;
@@ -45,26 +61,18 @@ const B64_WRAP_COLS = 76;
 // When the caller doesn't know the assigned VM hostname yet (the wizard's
 // production submit path — the SecretAI portal returns the hostname only
 // after vm/create), we put this sentinel into the rendered openclaw.json
-// `controlUi.allowedOrigins`. The seed script in
-// `deploys/byo/templates/docker-compose.yml` `sed`-replaces the sentinel
-// with $VM_HOSTNAME (from usr/.env, populated by the SecretVM platform)
-// on first boot, before the gateway starts.
+// `controlUi.allowedOrigins`. The seed script `sed`-replaces it with
+// $DOMAIN_NAME at first boot.
 //
-// OpenClaw's controlUi rejects wildcard patterns ("Use full origins such
-// as http://localhost:5173, not wildcard patterns"), so we cannot just
-// inline `*.vm.scrtlabs.com`. The runtime substitution is the only path
-// that produces a literal origin matching the assigned hostname.
-//
-// Hyphens (not underscores) between words are deliberate — they keep the
-// sentinel from matching the renderer's `__[A-Z][A-Z0-9_]+__` regex for
-// "unsubstituted tokens remain". Without hyphens, the renderer would bail
-// when it encountered the sentinel literally in the docker-compose.yml
-// seed script (where the sed command lives).
+// Hyphens (not underscores) deliberately — keeps the sentinel from matching
+// the renderer's `__[A-Z][A-Z0-9_]+__` regex for "unsubstituted tokens
+// remain". Without hyphens, the renderer would bail when it sees the
+// sentinel literally inside the docker-compose.yml seed script.
 const RUNTIME_HOSTNAME_SENTINEL = "__RUNTIME-VM-HOSTNAME__";
 const DEFAULT_VM_HOSTNAME = RUNTIME_HOSTNAME_SENTINEL;
 
-function readTemplate(...parts: string[]): string {
-  return fs.readFileSync(path.join(TEMPLATES_DIR, ...parts), "utf-8");
+function readTemplate(tier: Tier, ...parts: string[]): string {
+  return fs.readFileSync(path.join(tierTemplatesDir(tier), ...parts), "utf-8");
 }
 
 function renderStr(template: string, replacements: Record<string, string>): string {
@@ -81,7 +89,6 @@ function renderStr(template: string, replacements: Record<string, string>): stri
 }
 
 function deriveWelcomeAtIso(): string {
-  // Anchor at 2026-01-01T00:01:00Z so cron catches it up on first boot.
   return "2026-01-01T00:01:00Z";
 }
 
@@ -107,32 +114,33 @@ function b64ForYamlBlock(body: string): string {
   return head + "\n" + tail;
 }
 
-/**
- * Match Python's `json.dumps(data, indent=2, ensure_ascii=False) + "\n"`.
- * JSON.stringify(data, null, 2) produces the same output for the inputs we
- * care about (objects, arrays, strings, numbers, booleans, null) because
- * both runtimes use insertion-order key iteration.
- */
 function stringifyJson(value: unknown): string {
   return JSON.stringify(value, null, 2) + "\n";
 }
 
 function renderOpenclawJson(opts: {
+  tier: Tier;
   vmHostname: string;
-  anthropicApiKey: string;
+  anthropicApiKey?: string;
+  secretaiApiKey?: string;
   telegramBotToken: string;
   telegramChatId: string;
   gatewayToken: string;
   telegramEnabled: boolean;
 }): string {
-  const tmpl = readTemplate("openclaw.json");
-  const intermediate = renderStr(tmpl, {
+  const tmpl = readTemplate(opts.tier, "openclaw.json");
+  const replacements: Record<string, string> = {
     VM_HOSTNAME: opts.vmHostname,
-    ANTHROPIC_API_KEY: opts.anthropicApiKey,
     TELEGRAM_BOT_TOKEN: opts.telegramBotToken || "DISABLED",
     TELEGRAM_CHAT_ID: opts.telegramChatId || "0",
     GATEWAY_TOKEN: opts.gatewayToken,
-  });
+  };
+  if (opts.tier === "byo") {
+    replacements.ANTHROPIC_API_KEY = opts.anthropicApiKey || "";
+  } else {
+    replacements.SECRETAI_API_KEY = opts.secretaiApiKey || "";
+  }
+  const intermediate = renderStr(tmpl, replacements);
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const data: any = JSON.parse(intermediate);
@@ -154,11 +162,12 @@ function renderOpenclawJson(opts: {
 }
 
 function renderCronJobs(opts: {
+  tier: Tier;
   telegramChatId: string;
   welcomeAtIso: string;
   telegramEnabled: boolean;
 }): string {
-  const tmpl = readTemplate("cron-jobs.json");
+  const tmpl = readTemplate(opts.tier, "cron-jobs.json");
   const intermediate = renderStr(tmpl, {
     TELEGRAM_CHAT_ID: opts.telegramChatId || "0",
     WELCOME_AT_ISO: opts.welcomeAtIso,
@@ -177,6 +186,7 @@ function renderCronJobs(opts: {
 }
 
 function renderWorkspace(opts: {
+  tier: Tier;
   telegramChatId: string;
   telegramEnabled: boolean;
 }): Record<string, string> {
@@ -192,19 +202,20 @@ function renderWorkspace(opts: {
 
   const out: Record<string, string> = {};
   for (const name of ["AGENTS.md", "IDENTITY.md", "SOUL.md", "USER.md"]) {
-    const tmpl = readTemplate("workspace", name);
+    const tmpl = readTemplate(opts.tier, "workspace", name);
     out[name] = renderStr(tmpl, subs);
   }
   return out;
 }
 
 function renderCompose(opts: {
+  tier: Tier;
   deploymentId: string;
   openclawJson: string;
   cronJobs: string;
   workspace: Record<string, string>;
 }): string {
-  const tmpl = readTemplate("docker-compose.yml");
+  const tmpl = readTemplate(opts.tier, "docker-compose.yml");
   return renderStr(tmpl, {
     DEPLOYMENT_ID: opts.deploymentId,
     DEPLOYMENT_ID_SHORT: opts.deploymentId.split("-")[0]!,
@@ -217,19 +228,22 @@ function renderCompose(opts: {
   });
 }
 
-/**
- * Render the deploy package.
- *
- * Throws if required inputs are missing or malformed. Returns the rendered
- * compose along with the auxiliary files (for tests and observability) and
- * the generated deployment_id + gateway_token.
- */
 export function render(config: RenderConfig): RenderResult {
-  if (!config.anthropicApiKey) {
-    throw new Error("render.ts: anthropicApiKey is required");
-  }
-  if (!config.anthropicApiKey.startsWith("sk-ant-")) {
-    throw new Error("render.ts: anthropicApiKey should start with 'sk-ant-'");
+  const tier: Tier = config.tier || "byo";
+
+  if (tier === "byo") {
+    if (!config.anthropicApiKey) {
+      throw new Error("render.ts: anthropicApiKey is required for BYO tier");
+    }
+    if (!config.anthropicApiKey.startsWith("sk-ant-")) {
+      throw new Error("render.ts: anthropicApiKey should start with 'sk-ant-'");
+    }
+  } else if (tier === "secret") {
+    if (!config.secretaiApiKey) {
+      throw new Error("render.ts: secretaiApiKey is required for Secret tier");
+    }
+  } else {
+    throw new Error(`render.ts: unknown tier ${JSON.stringify(tier)}`);
   }
 
   const vmHostname = (config.vmHostname || DEFAULT_VM_HOSTNAME).trim();
@@ -259,8 +273,10 @@ export function render(config: RenderConfig): RenderResult {
   const welcomeAtIso = config.welcomeAtIso || deriveWelcomeAtIso();
 
   const openclawJson = renderOpenclawJson({
+    tier,
     vmHostname,
     anthropicApiKey: config.anthropicApiKey,
+    secretaiApiKey: config.secretaiApiKey,
     telegramBotToken: tgToken,
     telegramChatId: tgChat,
     gatewayToken,
@@ -268,17 +284,20 @@ export function render(config: RenderConfig): RenderResult {
   });
 
   const cronJobsJson = renderCronJobs({
+    tier,
     telegramChatId: tgChat,
     welcomeAtIso,
     telegramEnabled,
   });
 
   const workspace = renderWorkspace({
+    tier,
     telegramChatId: tgChat,
     telegramEnabled,
   });
 
   const compose = renderCompose({
+    tier,
     deploymentId,
     openclawJson,
     cronJobs: cronJobsJson,
@@ -293,5 +312,6 @@ export function render(config: RenderConfig): RenderResult {
     deploymentId,
     gatewayToken,
     telegramEnabled,
+    tier,
   };
 }

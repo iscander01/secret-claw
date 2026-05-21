@@ -18,6 +18,7 @@ type ValidationState = {
 };
 
 type TelegramChoice = "enabled" | "skipped" | null;
+type Tier = "byo" | "secret";
 
 interface SectionShellProps {
   id: string;
@@ -77,6 +78,7 @@ function ErrorDetail({ detail }: { detail: string }) {
 export default function CreateAgentPage() {
   const router = useRouter();
 
+  const [tier, setTier] = useState<Tier>("byo");
   const [secretaiKey, setSecretaiKey] = useState("");
   const [anthropicKey, setAnthropicKey] = useState("");
   const [telegramChoice, setTelegramChoice] = useState<TelegramChoice>(null);
@@ -94,15 +96,17 @@ export default function CreateAgentPage() {
 
   const formRef = useRef<HTMLFormElement>(null);
 
-  const tierValid = true;
   const secretaiValid = secretaiState.kind === "valid";
-  const anthropicValid = anthropicState.kind === "valid";
+  // Anthropic key is only required for the BYO tier. Secret tier uses the
+  // SecretAI key for inference (same key, two roles: vm/create auth + OpenClaw
+  // provider apiKey).
+  const anthropicValid = tier === "secret" ? true : anthropicState.kind === "valid";
   const telegramValid =
     telegramChoice === "skipped" || (telegramChoice === "enabled" && telegramState.kind === "valid");
 
   function firstInvalidId(): string | null {
     if (!secretaiValid) return "section-secretai";
-    if (!anthropicValid) return "section-anthropic";
+    if (tier === "byo" && !anthropicValid) return "section-anthropic";
     if (!telegramValid) return "section-telegram";
     return null;
   }
@@ -254,9 +258,9 @@ export default function CreateAgentPage() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          tier: "byo",
+          tier,
           secretaiApiKey: secretaiKey.trim(),
-          anthropicApiKey: anthropicKey.trim(),
+          anthropicApiKey: tier === "byo" ? anthropicKey.trim() : undefined,
           telegramEnabled: telegramChoice === "enabled",
           telegramBotToken: telegramChoice === "enabled" ? botToken.trim() : undefined,
           telegramChatId: telegramChoice === "enabled" ? chatId.trim() : undefined,
@@ -304,14 +308,15 @@ export default function CreateAgentPage() {
               <SelectionCard
                 title="BYO API"
                 description="You bring an Anthropic API key. Powered by Claude Sonnet 4.6 from Anthropic."
-                selected
-                onClick={() => undefined}
+                selected={tier === "byo"}
+                onClick={() => setTier("byo")}
               />
               <SelectionCard
                 title="Secret"
-                description="Model hosted on SecretAI for end-to-end dual attestation. Waiting on qwen3.6."
-                disabled
-                badge="Coming soon"
+                description="Model hosted on SecretAI for end-to-end dual attestation. Powered by qwen3.5-uncensored-aggressive:27b on SecretAI rytn."
+                selected={tier === "secret"}
+                onClick={() => setTier("secret")}
+                badge="Preview"
               />
             </div>
           </SectionShell>
@@ -348,37 +353,51 @@ export default function CreateAgentPage() {
             </p>
           </SectionShell>
 
-          <SectionShell
-            id="section-anthropic"
-            index={3}
-            title="Anthropic API Key"
-            helper="Your Anthropic key powers Claude Sonnet 4.6 inference. It's baked into the agent's config inside your attested VM — Anthropic sees the inference, the wizard never persists the key."
-            status={anthropicState.kind === "idle" ? undefined : anthropicState}
-            invalid={showInvalidHighlights && !anthropicValid}
-          >
-            <FormInput
-              type="text"
-              monospace
-              placeholder="sk-ant-..."
-              value={anthropicKey}
-              onChange={(e) => {
-                setAnthropicKey(e.target.value);
-                if (anthropicState.kind !== "idle") setAnthropicState({ kind: "idle" });
-              }}
-              onBlur={() => void validateAnthropic()}
-              invalid={anthropicState.kind === "invalid"}
-            />
-            <p className="mt-2 text-[11px] text-portal-muted">
-              <a
-                href="https://console.anthropic.com/settings/keys"
-                target="_blank"
-                rel="noreferrer"
-                className="text-portal-accent hover:underline"
-              >
-                Get an Anthropic API key →
-              </a>
-            </p>
-          </SectionShell>
+          {tier === "byo" ? (
+            <SectionShell
+              id="section-anthropic"
+              index={3}
+              title="Anthropic API Key"
+              helper="Your Anthropic key powers Claude Sonnet 4.6 inference. It's baked into the agent's config inside your attested VM — Anthropic sees the inference, the wizard never persists the key."
+              status={anthropicState.kind === "idle" ? undefined : anthropicState}
+              invalid={showInvalidHighlights && !anthropicValid}
+            >
+              <FormInput
+                type="text"
+                monospace
+                placeholder="sk-ant-..."
+                value={anthropicKey}
+                onChange={(e) => {
+                  setAnthropicKey(e.target.value);
+                  if (anthropicState.kind !== "idle") setAnthropicState({ kind: "idle" });
+                }}
+                onBlur={() => void validateAnthropic()}
+                invalid={anthropicState.kind === "invalid"}
+              />
+              <p className="mt-2 text-[11px] text-portal-muted">
+                <a
+                  href="https://console.anthropic.com/settings/keys"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="text-portal-accent hover:underline"
+                >
+                  Get an Anthropic API key →
+                </a>
+              </p>
+            </SectionShell>
+          ) : (
+            <SectionShell
+              id="section-anthropic"
+              index={3}
+              title="Inference"
+              helper="Secret tier runs inference on SecretAI's attested infrastructure — qwen3.5-uncensored-aggressive:27b on rytn. Uses the same SecretAI key from Section 2; no separate API key needed."
+            >
+              <div className="rounded-md border border-portal-border bg-portal-bg px-3 py-2 text-xs text-portal-muted">
+                <span className="font-mono text-portal-text">secretai-rytn / qwen3.5-uncensored:27b</span>
+                <span className="ml-3 text-portal-mutedDim">· 256K context · attested compute</span>
+              </div>
+            </SectionShell>
+          )}
 
           <SectionShell
             id="section-telegram"

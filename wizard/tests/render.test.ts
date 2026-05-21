@@ -165,6 +165,7 @@ for (const fixture of FIXTURES) {
     ]);
 
     const tsResult = render({
+      tier: "byo",
       vmHostname: fixture.vmHostname,
       anthropicApiKey: fixture.anthropicApiKey,
       telegramBotToken: fixture.telegramBotToken,

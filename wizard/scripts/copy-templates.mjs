@@ -1,23 +1,25 @@
 #!/usr/bin/env node
 /**
- * Copy the canonical deploy templates from ../deploys/byo/templates/ into
- * wizard/templates/ so `lib/render.ts` can find them when the wizard runs
- * on a platform whose build context is only the wizard/ directory
- * (Vercel, Cloudflare Pages, etc.).
+ * Copy canonical deploy templates into wizard/templates/<tier>/ so
+ * `lib/render.ts` can find them when the wizard runs on a platform whose
+ * build context is wizard/-only (Vercel, Cloudflare Pages, etc.).
  *
- * Runs as the `prebuild` and `pretest` npm hooks. Behavior:
- *  - If the source templates exist at ../deploys/byo/templates/, copy
- *    (overwrite) them into ./templates/. This is the local dev + Vercel
- *    path.
- *  - If the source doesn't exist but ./templates/ is already populated,
- *    skip silently. This handles the Docker builder stage, where the
- *    Dockerfile pre-populates ./templates from the build context's
- *    deploys/byo/ before `npm run build` fires.
- *  - If neither source exists, fail loudly.
+ * Source: ../deploys/<tier>/templates/
+ * Dest:   ./templates/<tier>/
  *
- * The copied wizard/templates/ directory is .gitignored — it's a build
- * artifact, not source. deploys/byo/templates/ remains the canonical
- * source of truth.
+ * Runs as `prebuild` and `pretest` npm hooks. Behavior:
+ *  - If a tier's source exists, copy (overwrite) it. Local-dev and Vercel
+ *    paths take this branch.
+ *  - If source is missing but ./templates/<tier>/ is already populated,
+ *    skip silently. Handles the Docker builder stage, where the Dockerfile
+ *    pre-populates ./templates from the build context's deploys/ before
+ *    `npm run build` fires.
+ *  - If neither exists for a required tier (byo), fail loudly. Optional
+ *    tier (secret) is skipped with a warning if absent — that lets the
+ *    repo build before deploys/secret/ is populated.
+ *
+ * wizard/templates/ is .gitignored — it's a build artifact, not source.
+ * deploys/<tier>/templates/ remains the canonical source of truth.
  */
 
 import fs from "node:fs";
@@ -27,17 +29,29 @@ import { fileURLToPath } from "node:url";
 const __filename = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(__filename);
 const WIZARD_ROOT = path.resolve(SCRIPT_DIR, "..");
+const DEPLOYS_ROOT = path.resolve(WIZARD_ROOT, "..", "deploys");
+const DEST_ROOT = path.resolve(WIZARD_ROOT, "templates");
 
-const SOURCE = path.resolve(WIZARD_ROOT, "..", "deploys", "byo", "templates");
-const DEST = path.resolve(WIZARD_ROOT, "templates");
+/** @type {{tier: string, required: boolean}[]} */
+const TIERS = [
+  { tier: "byo", required: true },
+  { tier: "secret", required: false },
+];
 
-if (fs.existsSync(SOURCE)) {
-  fs.rmSync(DEST, { recursive: true, force: true });
-  fs.cpSync(SOURCE, DEST, { recursive: true });
-  console.log(`[copy-templates] copied ${SOURCE} -> ${DEST}`);
-} else if (fs.existsSync(DEST)) {
-  console.log(`[copy-templates] source ${SOURCE} not present; using pre-populated ${DEST}`);
-} else {
-  console.error(`[copy-templates] ERROR: source not found at ${SOURCE} and no pre-populated ${DEST}`);
-  process.exit(1);
+for (const { tier, required } of TIERS) {
+  const source = path.join(DEPLOYS_ROOT, tier, "templates");
+  const dest = path.join(DEST_ROOT, tier);
+
+  if (fs.existsSync(source)) {
+    fs.rmSync(dest, { recursive: true, force: true });
+    fs.cpSync(source, dest, { recursive: true });
+    console.log(`[copy-templates] ${tier}: ${source} -> ${dest}`);
+  } else if (fs.existsSync(path.join(dest, "openclaw.json"))) {
+    console.log(`[copy-templates] ${tier}: source missing, using pre-populated ${dest}`);
+  } else if (required) {
+    console.error(`[copy-templates] ERROR: required tier ${tier} not found at ${source} or ${dest}`);
+    process.exit(1);
+  } else {
+    console.warn(`[copy-templates] WARN: optional tier ${tier} not present at ${source}; skipping`);
+  }
 }
