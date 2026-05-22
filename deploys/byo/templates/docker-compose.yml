@@ -162,6 +162,16 @@ configs:
         base64 -d > /home/node/.openclaw/agents/main/workspace/USER.md <<'USER_MD_B64_EOF'
       __USER_MD_B64__
       USER_MD_B64_EOF
+        # Seed exec-approvals.json so the agent's `exec` tool runs without
+        # prompting the user to /approve each invocation. The host-level
+        # approvals file must agree with openclaw.json's
+        # `tools.exec.security: "full"` + `tools.exec.ask: "off"`; without
+        # this file, exec falls back to the default per-invocation approval
+        # flow and the agent can't autonomously run `openclaw cron add`,
+        # web_fetch helpers, etc. For the wizard's "deploy and use"
+        # promise, the user owns the VM and trusts their own agent, so
+        # full + off is the appropriate posture. (Reviewed in FINDINGS.md.)
+        echo '{"version":1,"defaults":{"security":"full","ask":"off","askFallback":"full"}}' > /home/node/.openclaw/exec-approvals.json
         # Substitute the assigned hostname into controlUi.allowedOrigins.
         # The renderer leaves __RUNTIME-VM-HOSTNAME__ (hyphens, not
         # underscores — see lib/render.ts for why) as a sentinel because

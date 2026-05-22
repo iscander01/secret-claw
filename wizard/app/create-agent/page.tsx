@@ -111,13 +111,21 @@ export default function CreateAgentPage() {
     return null;
   }
 
-  async function validateSecretai() {
+  // Each validator returns the final ValidationState it settled on (in
+  // addition to setting it on React state for the UI). The submit handler
+  // uses these return values directly so it doesn't race with React's
+  // async state-flush — a previous bug where the first Create click
+  // silently exited because state was still `idle` / `validating` while
+  // the per-field blur was firing in parallel.
+  async function validateSecretai(): Promise<ValidationState> {
     const trimmed = secretaiKey.trim();
     if (!trimmed) {
-      setSecretaiState({ kind: "idle" });
-      return;
+      const s: ValidationState = { kind: "idle" };
+      setSecretaiState(s);
+      return s;
     }
     setSecretaiState({ kind: "validating" });
+    let result: ValidationState;
     try {
       const res = await fetch("/api/portal/validate-secretai-key", {
         method: "POST",
@@ -131,37 +139,41 @@ export default function CreateAgentPage() {
         status?: number;
       };
       if (body.valid) {
-        setSecretaiState({
+        result = {
           kind: "valid",
           message:
             typeof body.vmCount === "number" && body.vmCount > 0
               ? `Valid · ${body.vmCount} existing VM${body.vmCount === 1 ? "" : "s"}`
               : "Valid",
           vmCount: body.vmCount,
-        });
+        };
       } else {
-        setSecretaiState({
+        result = {
           kind: "invalid",
           message: body.error || "Invalid key",
           detail: `portal validation returned status ${body.status ?? "unknown"}`,
-        });
+        };
       }
     } catch (err) {
-      setSecretaiState({
+      result = {
         kind: "invalid",
         message: "Network error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      };
     }
+    setSecretaiState(result);
+    return result;
   }
 
-  async function validateAnthropic() {
+  async function validateAnthropic(): Promise<ValidationState> {
     const trimmed = anthropicKey.trim();
     if (!trimmed) {
-      setAnthropicState({ kind: "idle" });
-      return;
+      const s: ValidationState = { kind: "idle" };
+      setAnthropicState(s);
+      return s;
     }
     setAnthropicState({ kind: "validating" });
+    let result: ValidationState;
     try {
       const res = await fetch("/api/validate-anthropic-key", {
         method: "POST",
@@ -175,39 +187,44 @@ export default function CreateAgentPage() {
         status?: number;
       };
       if (body.valid) {
-        setAnthropicState({ kind: "valid", message: "Valid" });
+        result = { kind: "valid", message: "Valid" };
       } else {
-        setAnthropicState({
+        result = {
           kind: "invalid",
           message: body.error || "Invalid key",
           detail: body.detail || `Anthropic returned status ${body.status ?? "unknown"}`,
-        });
+        };
       }
     } catch (err) {
-      setAnthropicState({
+      result = {
         kind: "invalid",
         message: "Network error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      };
     }
+    setAnthropicState(result);
+    return result;
   }
 
-  async function validateTelegram() {
+  async function validateTelegram(): Promise<ValidationState> {
     const tokenT = botToken.trim();
     const chatT = chatId.trim();
     if (!tokenT && !chatT) {
-      setTelegramState({ kind: "idle" });
-      return;
+      const s: ValidationState = { kind: "idle" };
+      setTelegramState(s);
+      return s;
     }
     if (!tokenT || !chatT) {
-      setTelegramState({
+      const s: ValidationState = {
         kind: "invalid",
         message: "Both fields required",
         detail: "Bot token and chat ID must both be provided to enable Telegram.",
-      });
-      return;
+      };
+      setTelegramState(s);
+      return s;
     }
     setTelegramState({ kind: "validating" });
+    let result: ValidationState;
     try {
       const res = await fetch("/api/validate-telegram", {
         method: "POST",
@@ -222,37 +239,73 @@ export default function CreateAgentPage() {
       };
       if (body.valid) {
         setBotUsername(body.botUsername);
-        setTelegramState({
+        result = {
           kind: "valid",
           message: body.botUsername ? `Valid · @${body.botUsername}` : "Valid",
           botUsername: body.botUsername,
-        });
+        };
       } else {
-        setTelegramState({
+        result = {
           kind: "invalid",
           message: body.error || "Invalid",
           detail: `Telegram returned status ${body.status ?? "unknown"}`,
-        });
+        };
       }
     } catch (err) {
-      setTelegramState({
+      result = {
         kind: "invalid",
         message: "Network error",
         detail: err instanceof Error ? err.message : String(err),
-      });
+      };
     }
+    setTelegramState(result);
+    return result;
   }
 
   async function onSubmit() {
     setSubmitError(null);
-    const target = firstInvalidId();
+    setShowInvalidHighlights(true);
+    setSubmitting(true);
+
+    // Run-or-re-run all relevant validations and AWAIT their return values
+    // before deciding whether to submit. Reading React state here would
+    // race with the field-blur validation that fires when focus shifts to
+    // the Create button — the first click would silently exit because
+    // state was still `idle`/`validating`. Using direct return values
+    // dodges the race entirely.
+    const secretaiResult = await validateSecretai();
+    const anthropicResult: ValidationState =
+      tier === "byo" ? await validateAnthropic() : { kind: "valid" };
+
+    let telegramResult: ValidationState;
+    if (telegramChoice === "enabled") {
+      telegramResult = await validateTelegram();
+    } else if (telegramChoice === "skipped") {
+      telegramResult = { kind: "valid" };
+    } else {
+      // null — user hasn't picked Enable or Skip yet
+      telegramResult = {
+        kind: "invalid",
+        message: "Choose Enable or Skip",
+        detail: "Pick one of the Telegram options before continuing.",
+      };
+      setTelegramState(telegramResult);
+    }
+
+    // Determine first invalid section (top-down, matching form order).
+    let target: string | null = null;
+    if (secretaiResult.kind !== "valid") target = "section-secretai";
+    else if (tier === "byo" && anthropicResult.kind !== "valid")
+      target = "section-anthropic";
+    else if (telegramResult.kind !== "valid") target = "section-telegram";
+
     if (target) {
-      setShowInvalidHighlights(true);
+      setSubmitting(false);
       const el = document.getElementById(target);
       if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       return;
     }
-    setSubmitting(true);
+
     try {
       const res = await fetch("/api/portal/submit-deployment", {
         method: "POST",

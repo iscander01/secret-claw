@@ -135,6 +135,110 @@ the demo's privacy claims.
 
 ---
 
+## 7. Submit-button race: blur-validated form fields create a "click twice" bug
+
+**Discovered:** 2026-05-21 (wizard QA on Vercel-hosted instance).
+
+**Symptom:** On `/create-agent`, clicking the **Create** button the
+first time appeared to do nothing visible. Clicking it a second time
+submitted the form normally. Verified by users on production
+Vercel-deployed wizard.
+
+**Why it matters:** Two real consequences. (1) UX regression — a
+silent no-op is the worst kind of button. (2) For
+demo-with-Alex-and-other-testers scenarios, the wizard's "submit
+should just work" promise breaks immediately at the most important
+moment.
+
+**Root cause:** Per the v0.8 design, the wizard validates each form
+field on blur, not on every keystroke. When a user filled out the
+last input and clicked Create directly (no intermediate click out of
+the input), the blur fired in parallel with the click — meaning when
+the submit handler ran, the field's validation hadn't completed yet
+and the React `validatingState` was still `idle` or `validating`.
+`firstInvalidId()` returned a section, the handler silently scrolled
+to it and exited. By the second click, validation had completed in
+the background and the handler proceeded.
+
+**Fix:** Refactor each `validateX()` function in
+`wizard/app/create-agent/page.tsx` to **return** the final
+`ValidationState` in addition to setting it on React state. The
+submit handler now `await`s each validation (kicking off any that
+hadn't run yet) and reads the **returned value** instead of the
+stale React state, dodging the async-flush race entirely. The user
+sees field highlights, scroll-to-first-invalid, and a Creating…
+spinner from the first click forward.
+
+**Status:** Locked at commit on 2026-05-21.
+
+---
+
+## 8. OpenClaw exec tool requires pre-granted approval scopes
+
+**Discovered:** 2026-05-21 (chocolate-boar debug session for Secret
+tier routine creation).
+
+**Symptom:** Deployed agents would ask the user to type
+`/approve <uuid>` for each privileged operation — running `exec` for
+`openclaw cron add`, etc. Breaks the wizard's "deploy and use"
+promise: users expect the agent to just work after deployment, not
+to gate each tool invocation behind a manual approval.
+
+**Why it matters:** Routines added via chat are the core
+demonstration of agent capability ("ask the agent to set up a daily
+news brief, see it work"). If the user has to approve each step the
+agent takes, the agent isn't really agentic — it's an interactive
+shell wrapped in a chat UI.
+
+**Root cause:** OpenClaw's default sandbox policy gates exec behind
+per-invocation approval. The config schema requires:
+
+```json
+"tools": {
+  "exec": {
+    "host": "gateway",
+    "security": "full",
+    "ask": "off"
+  }
+}
+```
+
+…AND a matching `~/.openclaw/exec-approvals.json` file inside the
+container:
+
+```json
+{"version":1,"defaults":{"security":"full","ask":"off","askFallback":"full"}}
+```
+
+Without **both**, exec falls back to per-call prompting.
+
+**Fix:** Added the `tools.exec` config block to both
+`deploys/byo/templates/openclaw.json` and
+`deploys/secret/templates/openclaw.json`. Added a one-line `echo > `
+in the seed script of both `deploys/<tier>/templates/docker-compose.yml`
+that writes `exec-approvals.json` at first boot, alongside the
+existing base64-blob seeding pattern.
+
+**Trust-model trade-off (worth Alex's review):** Pre-granting
+`security: "full"` removes the user-approval safety boundary. For the
+v1 demo where the user owns their own attested-compute VM and trusts
+their own agent, this is the correct posture — the user has nothing
+to be protected *from* in this trust topology. For an eventual
+production version with multi-tenant or untrusted-agent scenarios,
+this should be constrained — possibly via a per-user "trust this
+agent" toggle in the wizard form, or a more granular allowlist of
+specific commands the agent may run. Note: gating routine creation
+under per-call approval doesn't actually make the system safer
+(the agent has the gateway token and can use the OpenClaw HTTP API
+directly anyway) — it just adds friction. The architectural
+hardening should happen at the *agent* trust layer, not at the *tool
+invocation* layer.
+
+**Status:** Locked at commit on 2026-05-21. Production-trust-model
+work tracked separately.
+
+---
+
 ## How to append
 
 Each entry: a heading with a sequence number + short title; a

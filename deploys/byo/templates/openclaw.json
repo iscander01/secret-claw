@@ -81,7 +81,12 @@
       "dir_list",
       "web_fetch",
       "message"
-    ]
+    ],
+    "exec": {
+      "host": "gateway",
+      "security": "full",
+      "ask": "off"
+    }
   },
   "plugins": {
     "entries": {
