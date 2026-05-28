@@ -334,6 +334,23 @@ export default function CreateAgentPage() {
         return;
       }
       const body = (await res.json()) as { deployment_id: string };
+      // Stash the SecretAI key in sessionStorage so the detail page can
+      // send it on each /api/deployment-status poll as a Bearer token
+      // — the portal job-status endpoint needs the key to report
+      // provisioning completion. Scoped to the tab; lost on close,
+      // which is fine because the VM should be provisioned within
+      // minutes. Not stored server-side (KV) to avoid keeping a
+      // long-lived copy of the user's key on Vercel's infra.
+      try {
+        sessionStorage.setItem(
+          `secret-claw:apikey:${body.deployment_id}`,
+          secretaiKey.trim(),
+        );
+      } catch {
+        // sessionStorage can be blocked in private windows. Polling will
+        // still work but won't update the provisioning state until the
+        // user refreshes the page after manually checking the VM.
+      }
       router.push(`/agents/${body.deployment_id}`);
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : "Network error");

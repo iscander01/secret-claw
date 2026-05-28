@@ -55,8 +55,22 @@ export default function AgentDetailPage({ params }: PageProps) {
     let cancelled = false;
     async function poll() {
       try {
+        // Pull the user's SecretAI key from sessionStorage (stashed by
+        // create-agent on submit) and send it as a Bearer token. The
+        // status route uses it to refresh provisioning state from the
+        // portal on-demand. Polls without the key still work but the
+        // record won't transition off "provisioning" until the user
+        // navigates back from a tab that has the key.
+        const headers: Record<string, string> = {};
+        try {
+          const apiKey = sessionStorage.getItem(`secret-claw:apikey:${deploymentId}`);
+          if (apiKey) headers["Authorization"] = `Bearer ${apiKey}`;
+        } catch {
+          // sessionStorage blocked — skip the header.
+        }
         const res = await fetch(`/api/deployment-status/${encodeURIComponent(deploymentId)}`, {
           cache: "no-store",
+          headers,
         });
         if (res.status === 404) {
           if (!cancelled) setNotFound(true);

@@ -165,11 +165,16 @@ async function handlePortalProvisioning(opts: {
       return;
     }
 
-    if (created.vmHostname) {
-      await db.update(deploymentId, { vm_id: created.vmId, vm_hostname: created.vmHostname });
-    } else {
-      await db.update(deploymentId, { vm_id: created.vmId });
-    }
+    // Persist vmId + vmHostname + jobId immediately so the detail page
+    // can show the URL and (on Vercel) drive on-demand portal job-status
+    // polling from the client side. The hostname comes back as
+    // `vmDomain` from the portal — assigned synchronously even if the
+    // VM is still provisioning.
+    await db.update(deploymentId, {
+      vm_id: created.vmId,
+      vm_hostname: created.vmHostname,
+      job_id: created.jobId,
+    });
 
     if (!created.jobId) {
       await db.update(deploymentId, {

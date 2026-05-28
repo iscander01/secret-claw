@@ -18,6 +18,12 @@ export interface DeploymentRecord {
   secretai_model?: string;
   vm_id?: string;
   vm_hostname?: string;
+  // Portal's background-job id returned from vm/create. Used by the
+  // deployment-status route to poll for provisioning completion
+  // on-demand (each client poll triggers one portal job-status check)
+  // — the fire-and-forget continuation in submit-deployment gets
+  // killed by Vercel before the multi-minute portal poll completes.
+  job_id?: string;
   gateway_token?: string;
   telegram_enabled: boolean;
   telegram_bot_username?: string;
