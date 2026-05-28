@@ -243,6 +243,7 @@ function renderHermesConfigYaml(opts: {
   tier: Tier;
   vmHostname: string;
   secretaiModel: string;
+  secretaiApiKey?: string;
 }): string {
   const tmpl = readTemplate("hermes", opts.tier, "config.yaml");
   const replacements: Record<string, string> = {
@@ -250,6 +251,11 @@ function renderHermesConfigYaml(opts: {
   };
   if (opts.tier === "secret") {
     replacements.MODEL = opts.secretaiModel;
+    // Hermes's custom-provider env-var fallback ignores OPENAI_API_KEY
+    // when base_url doesn't match openai.com — so we have to inline
+    // the key in config.yaml directly. See the comment in the
+    // config.yaml template for details.
+    replacements.SECRETAI_API_KEY = opts.secretaiApiKey || "";
   }
   return renderStr(tmpl, replacements);
 }
@@ -404,7 +410,12 @@ export function render(config: RenderConfig): RenderResult {
   }
 
   if (runtime === "hermes") {
-    const configYaml = renderHermesConfigYaml({ tier, vmHostname, secretaiModel });
+    const configYaml = renderHermesConfigYaml({
+      tier,
+      vmHostname,
+      secretaiModel,
+      secretaiApiKey: config.secretaiApiKey,
+    });
     const envFile = renderHermesEnv({
       tier,
       anthropicApiKey: config.anthropicApiKey,
