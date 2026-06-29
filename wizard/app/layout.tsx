@@ -2,9 +2,9 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Secret Claw — Deploy your agent",
+  title: "SecretForge — Forge your AI agent",
   description:
-    "Deploy your own private AI agent on SecretVM. Powered by the SecretAI Developer Portal.",
+    "Deploy your own private AI agent in a confidential enclave. Your keys, your data, your agent. Powered by SecretVM.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

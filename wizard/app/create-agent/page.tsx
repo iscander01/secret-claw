@@ -1,7 +1,9 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+
+import { SECRETAI_KEY_STORAGE_KEY } from "@/components/ui/GoogleSignInButton";
 
 import { PortalHeader } from "@/components/PortalHeader";
 import { SelectionCard } from "@/components/SelectionCard";
@@ -100,6 +102,21 @@ export default function CreateAgentPage() {
   const [showInvalidHighlights, setShowInvalidHighlights] = useState(false);
 
   const formRef = useRef<HTMLFormElement>(null);
+
+  // Pre-populate the SecretAI key if the homepage Google sign-in stub stashed
+  // one in sessionStorage. Cleared after read so it doesn't linger across the
+  // tab's lifetime. (Replaced by proper session management in Track A.)
+  useEffect(() => {
+    try {
+      const stashed = sessionStorage.getItem(SECRETAI_KEY_STORAGE_KEY);
+      if (stashed) {
+        setSecretaiKey(stashed);
+        sessionStorage.removeItem(SECRETAI_KEY_STORAGE_KEY);
+      }
+    } catch {
+      // sessionStorage may be unavailable (private windows); no-op.
+    }
+  }, []);
 
   const secretaiValid = secretaiState.kind === "valid";
   // Anthropic key is only required for the BYO tier. Secret tier uses the
