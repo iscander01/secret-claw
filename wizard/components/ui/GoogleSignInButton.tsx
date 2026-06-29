@@ -58,6 +58,7 @@ interface GoogleSignInButtonProps {
   size?: "sm" | "lg";
   label?: string;
   redirectTo?: string; // override post-auth destination (e.g. pre-selected wizard)
+  disabled?: boolean; // gate the CTA until a selection is complete
 }
 
 function GoogleGlyph({ className }: { className?: string }) {
@@ -91,6 +92,7 @@ export function GoogleSignInButton({
   size = "lg",
   label = "Sign in with Google",
   redirectTo,
+  disabled = false,
 }: GoogleSignInButtonProps) {
   const signIn = useGoogleSignIn();
 
@@ -100,8 +102,9 @@ export function GoogleSignInButton({
   return (
     <button
       type="button"
+      disabled={disabled}
       onClick={() => signIn({ redirectTo, onSuccess, onError })}
-      className={`inline-flex items-center justify-center rounded-md border border-portal-border bg-white font-semibold text-[#1F1F1F] shadow-sm transition-colors hover:bg-[#F5F5F5] ${sizeClasses} ${className || ""}`}
+      className={`inline-flex items-center justify-center rounded-md border border-portal-border bg-white font-semibold text-[#1F1F1F] shadow-sm transition-colors hover:bg-[#F5F5F5] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-white ${sizeClasses} ${className || ""}`}
     >
       <GoogleGlyph className={size === "lg" ? "h-5 w-5" : "h-4 w-4"} />
       {label}
