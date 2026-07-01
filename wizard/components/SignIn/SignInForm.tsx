@@ -1,10 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import React, { useState } from "react";
 import { signIn } from "next-auth/react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { keplrDetect, connectKeplrAndGetWalletInfo } from "@/lib/auth/keplr";
 import { metamaskDetect, connectMetamaskAndGetWalletInfo } from "@/lib/auth/metamask";
+import { KeplrIcon, MetaMaskIcon } from "@/components/ui/WalletIcons";
 
 type WalletModal = null | "keplr" | "metamask";
 type InstallPrompt = null | "keplr" | "metamask";
@@ -207,13 +208,13 @@ export function SignInForm() {
             {!installPrompt ? (
               <div className="flex gap-4">
                 <WalletOption
-                  src="/keplr.svg"
+                  icon={<KeplrIcon className="h-10 w-10" />}
                   label="Keplr"
                   disabled={walletLoading}
                   onClick={() => handleWalletSelect("keplr")}
                 />
                 <WalletOption
-                  src="/metamask.svg"
+                  icon={<MetaMaskIcon className="h-10 w-10" />}
                   label="MetaMask"
                   disabled={walletLoading}
                   onClick={() => handleWalletSelect("metamask")}
@@ -221,11 +222,10 @@ export function SignInForm() {
               </div>
             ) : (
               <div className="flex flex-col items-center gap-4 text-center">
-                <img
-                  src={installPrompt === "keplr" ? "/keplr.svg" : "/metamask.svg"}
-                  alt={installPrompt}
-                  className="h-12 w-12"
-                />
+                {installPrompt === "keplr"
+                  ? <KeplrIcon className="h-12 w-12" />
+                  : <MetaMaskIcon className="h-12 w-12" />
+                }
                 <p className="text-sm text-portal-text/70">
                   {installPrompt === "keplr" ? "Keplr" : "MetaMask"} wallet not detected. Please install the extension to continue.
                 </p>
@@ -263,12 +263,12 @@ export function SignInForm() {
 }
 
 function WalletOption({
-  src,
+  icon,
   label,
   onClick,
   disabled,
 }: {
-  src: string;
+  icon: React.ReactNode;
   label: string;
   onClick: () => void;
   disabled?: boolean;
@@ -280,7 +280,7 @@ function WalletOption({
       disabled={disabled}
       className="flex flex-1 flex-col items-center gap-2 rounded-lg border border-portal-border bg-portal-bg p-4 transition-colors hover:bg-portal-border/20 disabled:opacity-50"
     >
-      <img src={src} alt={label} className="h-10 w-10" />
+      {icon}
       <span className="text-sm text-portal-text">{label}</span>
     </button>
   );
